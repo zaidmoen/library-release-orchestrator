@@ -16,7 +16,7 @@ Release candidates are produced in this order:
 1. Group commits into logical changes by business key.
 2. Analyse dependencies between the requested changes and the excluded ones that
    sit between the base and the source branch, using static Python symbol and
-   module analysis plus shared-file and hunk-overlap detection.
+   module analysis plus shared-file detection. Textual overlap is decided by the real apply probe below rather than by a line-range heuristic.
 3. Probe applicability with a real `cherry-pick` in a **throwaway clone**.
 4. Plan only when there are no blocking findings, and require validation before
    PR readiness.
