@@ -156,7 +156,8 @@ class DependencyAnalyzer:
             module = pysym.module_name(fc.path, self.package_dir) or fc.path
             before_src = (
                 self.git.show_file(parent, fc.old_path or fc.path)
-                if parent and fc.status != "A" else None
+                if parent and fc.status != "A"
+                else None
             )
             after_src = self.git.show_file(commit.sha, fc.path) if fc.status != "D" else None
             try:
@@ -199,15 +200,20 @@ class DependencyAnalyzer:
             symbol = f"{module}.{attr}" if attr else module
             where = {"file": path, "line": ref.line, "symbol": symbol}
             kind: FindingKind | None = None
-            if attr == "" and module in e_eff.new_modules and module not in r_eff.new_modules:
+            needs_new_module = (
+                module in e_eff.new_modules or symbol in e_eff.new_modules
+            ) and not (module in r_eff.new_modules or symbol in r_eff.new_modules)
+            needs_new_symbol = (module, attr) in e_eff.introduced and (
+                module,
+                attr,
+            ) not in r_eff.introduced
+            needs_new_binding = (path, ref.name) in e_eff.new_bindings and (
+                path,
+                ref.name,
+            ) not in r_eff.new_bindings
+            if needs_new_module:
                 kind = FindingKind.MISSING_PREREQUISITE
-            elif (module in e_eff.new_modules or symbol in e_eff.new_modules) and not (
-                module in r_eff.new_modules or symbol in r_eff.new_modules
-            ):
-                kind = FindingKind.MISSING_PREREQUISITE
-            elif (module, attr) in e_eff.introduced and (module, attr) not in r_eff.introduced:
-                kind = FindingKind.DIRECT_CODE_DEPENDENCY
-            elif (path, ref.name) in e_eff.new_bindings and (path, ref.name) not in r_eff.new_bindings:
+            elif needs_new_symbol or needs_new_binding:
                 kind = FindingKind.DIRECT_CODE_DEPENDENCY
             elif (module, attr) in e_eff.modified:
                 kind = FindingKind.SHARED_SYMBOL_MODIFIED
@@ -226,14 +232,16 @@ class DependencyAnalyzer:
         shared = sorted(set(requested.files) & set(excluded.files))
         result = list(findings.values())
         if shared:
-            result.append(DependencyFinding(
-                kind=FindingKind.SHARED_FILE,
-                severity=Severity.WARNING,
-                change=requested.key,
-                depends_on=excluded.key,
-                message=f"{requested.key} and {excluded.key} modify the same file(s)",
-                evidence={"files": shared},
-            ))
+            result.append(
+                DependencyFinding(
+                    kind=FindingKind.SHARED_FILE,
+                    severity=Severity.WARNING,
+                    change=requested.key,
+                    depends_on=excluded.key,
+                    message=f"{requested.key} and {excluded.key} modify the same file(s)",
+                    evidence={"files": shared},
+                )
+            )
         return result
 
     def coverage_findings(self, unit: ChangeUnit) -> list[DependencyFinding]:
@@ -241,17 +249,25 @@ class DependencyAnalyzer:
         out = []
         code_like = [f for f in eff.unverified_files if not f.endswith(_DOC_SUFFIXES)]
         if code_like:
-            out.append(DependencyFinding(
-                kind=FindingKind.UNVERIFIED_FILE, severity=Severity.WARNING, change=unit.key,
-                message="Non-Python files are not covered by static dependency analysis",
-                evidence={"files": code_like},
-            ))
+            out.append(
+                DependencyFinding(
+                    kind=FindingKind.UNVERIFIED_FILE,
+                    severity=Severity.WARNING,
+                    change=unit.key,
+                    message="Non-Python files are not covered by static dependency analysis",
+                    evidence={"files": code_like},
+                )
+            )
         if eff.parse_errors:
-            out.append(DependencyFinding(
-                kind=FindingKind.PARSE_ERROR, severity=Severity.WARNING, change=unit.key,
-                message="Some Python sources could not be parsed; dependencies are unverified",
-                evidence={"errors": eff.parse_errors},
-            ))
+            out.append(
+                DependencyFinding(
+                    kind=FindingKind.PARSE_ERROR,
+                    severity=Severity.WARNING,
+                    change=unit.key,
+                    message="Some Python sources could not be parsed; dependencies are unverified",
+                    evidence={"errors": eff.parse_errors},
+                )
+            )
         return out
 
     def analyze(
@@ -268,20 +284,28 @@ class DependencyAnalyzer:
         for sha, keys in scan.ambiguous.items():
             for key in keys:
                 if key in requested:
-                    findings.append(DependencyFinding(
-                        kind=FindingKind.AMBIGUOUS_COMMIT, severity=Severity.BLOCKER,
-                        change=key, depends_on=f"AMBIGUOUS:{sha[:10]}",
-                        message=f"Commit {sha[:10]} references several changes {keys}; "
-                                "its ownership must be clarified before release",
-                        evidence={"commit": sha, "keys": keys},
-                    ))
+                    findings.append(
+                        DependencyFinding(
+                            kind=FindingKind.AMBIGUOUS_COMMIT,
+                            severity=Severity.BLOCKER,
+                            change=key,
+                            depends_on=f"AMBIGUOUS:{sha[:10]}",
+                            message=f"Commit {sha[:10]} references several changes {keys}; "
+                            "its ownership must be clarified before release",
+                            evidence={"commit": sha, "keys": keys},
+                        )
+                    )
                     graph.add_edge(key, f"AMBIGUOUS:{sha[:10]}")
         for sha in scan.merges_skipped:
-            findings.append(DependencyFinding(
-                kind=FindingKind.MERGE_COMMIT_SKIPPED, severity=Severity.WARNING, change="*",
-                message=f"Merge commit {sha[:10]} is not replayed; only its parents' commits are",
-                evidence={"commit": sha},
-            ))
+            findings.append(
+                DependencyFinding(
+                    kind=FindingKind.MERGE_COMMIT_SKIPPED,
+                    severity=Severity.WARNING,
+                    change="*",
+                    message=f"Merge commit {sha[:10]} is not replayed; only non-merge commits are",
+                    evidence={"commit": sha},
+                )
+            )
 
         # Iterate to a fixpoint so that transitive prerequisites are found.
         selected = list(requested)
@@ -310,33 +334,48 @@ class DependencyAnalyzer:
             f"{m}.{n}" for key in requested for (m, n) in self.effects(units[key]).removed_public
         )
         for symbol in api_removals:
-            findings.append(DependencyFinding(
-                kind=FindingKind.PUBLIC_API_REMOVED, severity=Severity.WARNING, change="*",
-                message=f"Public symbol {symbol} is removed: breaking change for consumers",
-                evidence={"symbol": symbol},
-            ))
+            findings.append(
+                DependencyFinding(
+                    kind=FindingKind.PUBLIC_API_REMOVED,
+                    severity=Severity.WARNING,
+                    change="*",
+                    message=f"Public symbol {symbol} is removed: breaking change for consumers",
+                    evidence={"symbol": symbol},
+                )
+            )
 
         probe_result = None
         if probe:
-            ordered = [sha for sha in scan.commit_order()
-                       if any(sha in units[k].shas for k in requested)]
+            ordered = [
+                sha for sha in scan.commit_order() if any(sha in units[k].shas for k in requested)
+            ]
             probe_result = probe_apply(self.git.path, scan.base_sha, ordered)
             if not probe_result.applied_cleanly:
                 causes = sorted(
-                    key for key, unit in units.items()
-                    if key not in requested
-                    and set(unit.files) & set(probe_result.conflicted_files)
+                    key
+                    for key, unit in units.items()
+                    if key not in requested and set(unit.files) & set(probe_result.conflicted_files)
                 )
-                owner = next((k for k in requested
-                              if probe_result.conflict_commit in units[k].shas), requested[0])
-                findings.append(DependencyFinding(
-                    kind=FindingKind.GIT_CONFLICT, severity=Severity.BLOCKER, change=owner,
-                    depends_on=causes[0] if len(causes) == 1 else None,
-                    message=(f"Commit {str(probe_result.conflict_commit)[:10]} of {owner} does "
-                             "not apply cleanly on the base"),
-                    evidence={"conflicted_files": probe_result.conflicted_files,
-                              "suspected_causes": causes},
-                ))
+                owner = next(
+                    (k for k in requested if probe_result.conflict_commit in units[k].shas),
+                    requested[0],
+                )
+                findings.append(
+                    DependencyFinding(
+                        kind=FindingKind.GIT_CONFLICT,
+                        severity=Severity.BLOCKER,
+                        change=owner,
+                        depends_on=causes[0] if len(causes) == 1 else None,
+                        message=(
+                            f"Commit {str(probe_result.conflict_commit)[:10]} of {owner} does "
+                            "not apply cleanly on the base"
+                        ),
+                        evidence={
+                            "conflicted_files": probe_result.conflicted_files,
+                            "suspected_causes": causes,
+                        },
+                    )
+                )
 
         prerequisites = sorted(graph.closure(requested) - set(requested))
         return AnalysisResult(
@@ -387,8 +426,9 @@ def _explain(kind: FindingKind, change: str, other: str, symbol: str) -> str:
         return f"{change} imports '{symbol}', a module that only exists after {other}"
     if kind is FindingKind.DIRECT_CODE_DEPENDENCY:
         return f"{change} uses '{symbol}', which is introduced by {other}"
-    return (f"{change} uses '{symbol}', whose behaviour {other} modified; "
-            "results may differ without it")
+    return (
+        f"{change} uses '{symbol}', whose behaviour {other} modified; results may differ without it"
+    )
 
 
 def _verdict(findings: list[DependencyFinding]) -> Verdict:

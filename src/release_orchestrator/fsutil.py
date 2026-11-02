@@ -7,7 +7,7 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 
 
@@ -18,10 +18,8 @@ def remove_tree(path: Path) -> None:
     for root, dirs, files in os.walk(path):
         for name in dirs + files:
             target = os.path.join(root, name)
-            try:
+            with suppress(OSError):
                 os.chmod(target, stat.S_IWRITE | stat.S_IREAD | stat.S_IEXEC)
-            except OSError:
-                pass
     shutil.rmtree(path, ignore_errors=True)
 
 

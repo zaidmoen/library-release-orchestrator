@@ -25,8 +25,13 @@ class PlannedCommit:
     release_patch_id: str  # expected once applied onto the base (from the sandbox probe)
 
     def to_dict(self) -> dict[str, str]:
-        return {"sha": self.sha, "subject": self.subject, "author": self.author,
-                "patch_id": self.patch_id, "release_patch_id": self.release_patch_id}
+        return {
+            "sha": self.sha,
+            "subject": self.subject,
+            "author": self.author,
+            "patch_id": self.patch_id,
+            "release_patch_id": self.release_patch_id,
+        }
 
 
 @dataclass(frozen=True)
@@ -36,8 +41,11 @@ class PlannedChange:
     commits: tuple[PlannedCommit, ...]
 
     def to_dict(self) -> dict[str, Any]:
-        return {"key": self.key, "title": self.title,
-                "commits": [c.to_dict() for c in self.commits]}
+        return {
+            "key": self.key,
+            "title": self.title,
+            "commits": [c.to_dict() for c in self.commits],
+        }
 
 
 @dataclass(frozen=True)
@@ -48,8 +56,12 @@ class ExcludedChange:
     reason: str
 
     def to_dict(self) -> dict[str, Any]:
-        return {"key": self.key, "title": self.title, "commits": list(self.commits),
-                "reason": self.reason}
+        return {
+            "key": self.key,
+            "title": self.title,
+            "commits": list(self.commits),
+            "reason": self.reason,
+        }
 
 
 @dataclass
@@ -117,8 +129,11 @@ class ReleasePlan:
             "schema_version": SCHEMA_VERSION,
             "plan_id": self.plan_id,
             "status": self.status,
-            "library": {"name": self.library, "package_dir": self.package_dir,
-                        "version_file": self.version_file},
+            "library": {
+                "name": self.library,
+                "package_dir": self.package_dir,
+                "version_file": self.version_file,
+            },
             "request": self.request,
             "release": {
                 "base_ref": self.base_ref,
@@ -136,8 +151,11 @@ class ReleasePlan:
             "analysis": self.analysis,
             "consumers": self.consumers,
             "compatibility_risks": self.compatibility_risks,
-            "validation": {"required": self.validation_required, "status": "pending",
-                           "evidence": "see run state; a manifest never proves its own validation"},
+            "validation": {
+                "required": self.validation_required,
+                "status": "pending",
+                "evidence": "see run state; a manifest never proves its own validation",
+            },
             "approval": {"required": True, "required_for": list(WRITE_STEPS)},
             "remediation": self.remediation,
             "blockers": self.blockers,
@@ -149,9 +167,18 @@ class ReleasePlan:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> ReleasePlan:
         release = dict(data["release"])
-        version = {k: release.pop(k) for k in
-                   ("previous_version", "proposed_version", "bump", "reasons", "collisions",
-                    "status") if k in release}
+        version = {
+            k: release.pop(k)
+            for k in (
+                "previous_version",
+                "proposed_version",
+                "bump",
+                "reasons",
+                "collisions",
+                "status",
+            )
+            if k in release
+        }
         lib = data["library"]
         return cls(
             library=lib["name"],
@@ -166,15 +193,26 @@ class ReleasePlan:
             apply_order=list(release.get("apply_order", [])),
             version=version,
             included=[
-                PlannedChange(c["key"], c.get("title", ""), tuple(
-                    PlannedCommit(m["sha"], m.get("subject", ""), m.get("author", ""),
-                                  m.get("patch_id", ""), m.get("release_patch_id", ""))
-                    for m in c["commits"]))
+                PlannedChange(
+                    c["key"],
+                    c.get("title", ""),
+                    tuple(
+                        PlannedCommit(
+                            m["sha"],
+                            m.get("subject", ""),
+                            m.get("author", ""),
+                            m.get("patch_id", ""),
+                            m.get("release_patch_id", ""),
+                        )
+                        for m in c["commits"]
+                    ),
+                )
                 for c in data["included_changes"]
             ],
             excluded=[
-                ExcludedChange(c["key"], c.get("title", ""), tuple(c.get("commits", [])),
-                               c.get("reason", ""))
+                ExcludedChange(
+                    c["key"], c.get("title", ""), tuple(c.get("commits", [])), c.get("reason", "")
+                )
                 for c in data["excluded_changes"]
             ],
             already_released=list(data.get("already_released", [])),

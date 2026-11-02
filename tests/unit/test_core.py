@@ -31,7 +31,10 @@ KEY = r"[A-Z][A-Z0-9]+-\d+"
 
 # ------------------------------------------------------------------ python symbols
 def test_module_name_mapping():
-    assert pysym.module_name("src/zaidlibrary/payments.py", "src/zaidlibrary") == "zaidlibrary.payments"
+    assert (
+        pysym.module_name("src/zaidlibrary/payments.py", "src/zaidlibrary")
+        == "zaidlibrary.payments"
+    )
     assert pysym.module_name("src/zaidlibrary/__init__.py", "src/zaidlibrary") == "zaidlibrary"
     assert pysym.module_name("tests/test_x.py", "src/zaidlibrary") == "tests.test_x"
     assert pysym.module_name("README.md", "src/zaidlibrary") is None
@@ -78,14 +81,30 @@ def test_graph_closure_and_cycles():
 # ------------------------------------------------------------------ history
 def _repo(tmp_path: Path) -> Git:
     def git(*args: str) -> None:
-        subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t",
-                        "-c", "user.email=t@example.invalid", *args], check=True,
-                       capture_output=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(tmp_path),
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.invalid",
+                *args,
+            ],
+            check=True,
+            capture_output=True,
+        )
 
     git("init", "-q", "-b", "main")
-    commits = [("base.py", "base", None), ("a.py", "FIN-1: feat: a", None),
-               ("b.py", "fix: b part 1", "Refs: FIN-2"), ("b2.py", "FIN-2: b part 2", None),
-               ("c.py", "FIN-1 FIN-2: shared", None), ("d.py", "docs: unrelated", None)]
+    commits = [
+        ("base.py", "base", None),
+        ("a.py", "FIN-1: feat: a", None),
+        ("b.py", "fix: b part 1", "Refs: FIN-2"),
+        ("b2.py", "FIN-2: b part 2", None),
+        ("c.py", "FIN-1 FIN-2: shared", None),
+        ("d.py", "docs: unrelated", None),
+    ]
     for i, (name, subject, body) in enumerate(commits):
         (tmp_path / name).write_text(f"X{i} = {i}\n")
         git("add", name)
@@ -117,14 +136,17 @@ def test_extract_keys_from_subject_and_trailer():
 @pytest.fixture
 def tracker(tmp_path):
     path = tmp_path / "jira.yaml"
-    path.write_text("issues:\n  FIN-198: {summary: A}\n  FIN-204: {summary: B, consumers: [svc, 'bad name!']}\n")
+    path.write_text(
+        "issues:\n  FIN-198: {summary: A}\n  FIN-204: {summary: B, consumers: [svc, 'bad name!']}\n"
+    )
     return FixtureIssueTracker(path)
 
 
 def test_natural_language_alias(tracker):
     aliases = {"change a": "FIN-198", "change b": "FIN-204"}
-    req = resolve_text("Release Change B before Change A", key_pattern=KEY, aliases=aliases,
-                       tracker=tracker)
+    req = resolve_text(
+        "Release Change B before Change A", key_pattern=KEY, aliases=aliases, tracker=tracker
+    )
     assert req.change_keys == ("FIN-204",) and req.deferred_keys == ("FIN-198",)
 
 
@@ -162,11 +184,21 @@ def test_state_transitions_enforced():
 
 
 # ------------------------------------------------------------------ git guard
-@pytest.mark.parametrize("args", [
-    ("push", "origin", "main"), ("merge", "x"), ("reset", "--hard"), ("branch", "-D", "x"),
-    ("branch", "-f", "x", "y"), ("tag", "-d", "v1"), ("checkout", "-f", "main"),
-    ("push", "--force"), ("cherry-pick", "--force"), ("stash",),
-])
+@pytest.mark.parametrize(
+    "args",
+    [
+        ("push", "origin", "main"),
+        ("merge", "x"),
+        ("reset", "--hard"),
+        ("branch", "-D", "x"),
+        ("branch", "-f", "x", "y"),
+        ("tag", "-d", "v1"),
+        ("checkout", "-f", "main"),
+        ("push", "--force"),
+        ("cherry-pick", "--force"),
+        ("stash",),
+    ],
+)
 def test_git_wrapper_rejects_forbidden_commands(tmp_path, args):
     with pytest.raises(ForbiddenOperationError):
         Git(tmp_path).run(*args)
@@ -194,7 +226,9 @@ def test_config_rejects_unknown_placeholder(tmp_path):
 
 
 def test_config_accepts_allowlisted_command(tmp_path):
-    path = _write_config(tmp_path, '    - {name: t, argv: ["{python}", "-V"], env: {X: "{library_path}"}}\n')
+    path = _write_config(
+        tmp_path, '    - {name: t, argv: ["{python}", "-V"], env: {X: "{library_path}"}}\n'
+    )
     config = load_config(path)
     assert config.library_validation[0].argv == ("{python}", "-V")
     assert config.state_dir == (tmp_path / ".lro-state").resolve()

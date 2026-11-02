@@ -35,7 +35,9 @@ class _JsonFormatter(logging.Formatter):
 
 def _configure_logging(verbose: bool, json_logs: bool) -> None:
     handler = logging.StreamHandler(sys.stderr)
-    handler.setFormatter(_JsonFormatter() if json_logs else logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    handler.setFormatter(
+        _JsonFormatter() if json_logs else logging.Formatter("%(levelname)s %(name)s: %(message)s")
+    )
     root = logging.getLogger("release_orchestrator")
     root.handlers[:] = [handler]
     root.setLevel(logging.DEBUG if verbose else logging.WARNING)
@@ -47,9 +49,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Dependency-aware, out-of-order release planning for shared libraries.",
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
-    parser.add_argument("--config", type=Path,
-                        default=Path(os.environ.get("LRO_CONFIG", "release-orchestrator.yaml")),
-                        help="trusted config file (default: $LRO_CONFIG or ./release-orchestrator.yaml)")
+    parser.add_argument(
+        "--config",
+        type=Path,
+        default=Path(os.environ.get("LRO_CONFIG", "release-orchestrator.yaml")),
+        help="trusted config file (default: $LRO_CONFIG or ./release-orchestrator.yaml)",
+    )
     parser.add_argument("--json", action="store_true", help="emit a JSON envelope on stdout")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("--log-json", action="store_true", help="structured JSON logs on stderr")
@@ -96,23 +101,31 @@ def build_parser() -> argparse.ArgumentParser:
 
 def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     if args.command == "demo-init":
-        config = build_demo(args.dest, args.scenario)
-        return ExitCode.OK, {"config": str(config), "scenario": args.scenario}
+        config_path = build_demo(args.dest, args.scenario)
+        return ExitCode.OK, {"config": str(config_path), "scenario": args.scenario}
 
     config = load_config(args.config)
     orch = Orchestrator(Services.from_config(config))
 
     if args.command in ("analyze", "plan"):
-        request = RequestInput(tuple(args.ticket), args.request, tuple(args.commit),
-                               args.base, args.source)
+        request = RequestInput(
+            tuple(args.ticket), args.request, tuple(args.commit), args.base, args.source
+        )
         if args.command == "analyze":
             resolved, scan, analysis = orch.analyze(request)
             code = ExitCode.BLOCKED if analysis.blockers else ExitCode.OK
-            return code, {"request": resolved.to_dict(), "history": scan.to_dict(),
-                          "analysis": analysis.to_dict()}
+            return code, {
+                "request": resolved.to_dict(),
+                "history": scan.to_dict(),
+                "analysis": analysis.to_dict(),
+            }
         plan, run_state = orch.plan(request)
-        result: dict[str, Any] = {"plan_id": plan.plan_id, "status": plan.status,
-                                  "state": str(run_state.state), "plan": plan.to_dict()}
+        result: dict[str, Any] = {
+            "plan_id": plan.plan_id,
+            "status": plan.status,
+            "state": str(run_state.state),
+            "plan": plan.to_dict(),
+        }
         if args.out:
             json_path, md_path = write_plan(plan, args.out)
             result["files"] = {"json": str(json_path), "markdown": str(md_path)}
@@ -152,12 +165,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         code, result = run(args)
     except OrchestratorError as exc:
         code, error = exc.exit_code, exc.to_dict()
-    except Exception as exc:  # noqa: BLE001 - last-resort guard; reported, never hidden
+    except Exception as exc:
         logging.getLogger("release_orchestrator").exception("internal error")
         code, error = ExitCode.INTERNAL_ERROR, {"code": "INTERNAL_ERROR", "message": str(exc)}
 
-    envelope = {"ok": code == ExitCode.OK, "command": args.command, "exit_code": int(code),
-                "result": result, "error": error}
+    envelope = {
+        "ok": code == ExitCode.OK,
+        "command": args.command,
+        "exit_code": int(code),
+        "result": result,
+        "error": error,
+    }
     if args.json:
         print(json.dumps(envelope, indent=2, default=str))
     else:
@@ -180,12 +198,14 @@ def _text_summary(command: str, env: dict[str, Any]) -> str:
     res = env["result"]
     if command in ("plan",):
         plan = res["plan"]
-        lines = [f"plan {res['plan_id']}: {res['status']} (run state {res['state']})",
-                 f"  version: {plan['release']['previous_version']} -> "
-                 f"{plan['release']['proposed_version']} ({plan['release']['bump']})",
-                 f"  verdict: {plan['analysis']['verdict']}",
-                 f"  include: {[c['key'] for c in plan['included_changes']]}",
-                 f"  exclude: {[c['key'] for c in plan['excluded_changes']]}"]
+        lines = [
+            f"plan {res['plan_id']}: {res['status']} (run state {res['state']})",
+            f"  version: {plan['release']['previous_version']} -> "
+            f"{plan['release']['proposed_version']} ({plan['release']['bump']})",
+            f"  verdict: {plan['analysis']['verdict']}",
+            f"  include: {[c['key'] for c in plan['included_changes']]}",
+            f"  exclude: {[c['key'] for c in plan['excluded_changes']]}",
+        ]
         lines += [f"  BLOCKER {b['reason']}: {b['message']}" for b in plan["blockers"]]
         lines += [f"  consumer {c['name']}: {c['action']}" for c in plan["consumers"]]
         if res.get("files"):

@@ -33,9 +33,15 @@ class CommandResult:
     output_tail: str
 
     def to_dict(self) -> dict[str, Any]:
-        return {"scope": self.scope, "name": self.name, "argv": self.argv, "status": self.status,
-                "exit_code": self.exit_code, "duration_seconds": self.duration_seconds,
-                "output_tail": self.output_tail}
+        return {
+            "scope": self.scope,
+            "name": self.name,
+            "argv": self.argv,
+            "status": self.status,
+            "exit_code": self.exit_code,
+            "duration_seconds": self.duration_seconds,
+            "output_tail": self.output_tail,
+        }
 
 
 @dataclass
@@ -54,8 +60,11 @@ class ValidationReport:
         return self.status == "PASSED"
 
     def to_dict(self) -> dict[str, Any]:
-        return {"scope": self.scope, "status": self.status,
-                "results": [r.to_dict() for r in self.results]}
+        return {
+            "scope": self.scope,
+            "status": self.status,
+            "results": [r.to_dict() for r in self.results],
+        }
 
 
 def _substitute(value: str, mapping: dict[str, str]) -> str:
@@ -81,17 +90,35 @@ def run_validation(
         started = time.monotonic()
         try:
             proc = subprocess.run(
-                argv, cwd=cwd, env=env, capture_output=True, text=True, encoding="utf-8",
-                errors="replace", timeout=spec.timeout_seconds, check=False,
+                argv,
+                cwd=cwd,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=spec.timeout_seconds,
+                check=False,
             )
             status = "PASSED" if proc.returncode == 0 else "FAILED"
             output, code = (proc.stdout + proc.stderr), proc.returncode
         except subprocess.TimeoutExpired as exc:
             status, code = "TIMED_OUT", None
-            output = f"timed out after {spec.timeout_seconds}s\n{exc.stdout or ''}"
+            raw = exc.stdout or b""
+            partial = raw.decode(errors="replace") if isinstance(raw, bytes) else raw
+            output = f"timed out after {spec.timeout_seconds}s\n{partial}"
         except OSError as exc:
             status, code, output = "ERROR", None, f"could not start command: {exc}"
         tail = "\n".join(str(output).strip().splitlines()[-_TAIL_LINES:])
-        report.results.append(CommandResult(scope, spec.name, list(spec.argv), status, code,
-                                            round(time.monotonic() - started, 2), tail))
+        report.results.append(
+            CommandResult(
+                scope,
+                spec.name,
+                list(spec.argv),
+                status,
+                code,
+                round(time.monotonic() - started, 2),
+                tail,
+            )
+        )
     return report

@@ -23,8 +23,19 @@ BOT_NAME = "Library Release Orchestrator"
 BOT_EMAIL = "release-orchestrator@localhost"
 
 _FORBIDDEN_SUBCOMMANDS = frozenset(
-    {"push", "merge", "rebase", "reset", "clean", "stash", "filter-branch", "gc", "prune",
-     "update-ref", "reflog"}
+    {
+        "push",
+        "merge",
+        "rebase",
+        "reset",
+        "clean",
+        "stash",
+        "filter-branch",
+        "gc",
+        "prune",
+        "update-ref",
+        "reflog",
+    }
 )
 _FORBIDDEN_FLAGS = {
     "branch": {"-d", "-D", "--delete", "-f", "--force", "-m", "-M", "--move", "-c", "-C"},
@@ -219,8 +230,16 @@ class Git:
 
     def archive_bytes(self, rev: str) -> bytes:
         """Deterministic tar of the committed tree at ``rev`` (no .git, no untracked files)."""
-        cmd = ["git", "-c", "core.longpaths=true", "-C", str(self.path), "archive",
-               "--format=tar", rev]
+        cmd = [
+            "git",
+            "-c",
+            "core.longpaths=true",
+            "-C",
+            str(self.path),
+            "archive",
+            "--format=tar",
+            rev,
+        ]
         proc = subprocess.run(cmd, capture_output=True, check=False, timeout=300)
         if proc.returncode != 0:
             raise GitError(f"git archive failed: {proc.stderr.decode(errors='replace')[:500]}")
@@ -239,9 +258,21 @@ def extract_tar(data: bytes, dest: Path) -> None:
 def clone_no_checkout(source: Path, dest: Path) -> Git:
     """Read-only sandbox: clone into ``dest`` without touching ``source``."""
     proc = subprocess.run(
-        ["git", "-c", "core.longpaths=true", "clone", "--quiet", "--no-checkout",
-         "--no-hardlinks", str(source), str(dest)],
-        capture_output=True, text=True, check=False, timeout=600,
+        [
+            "git",
+            "-c",
+            "core.longpaths=true",
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--no-hardlinks",
+            str(source),
+            str(dest),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=600,
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
     if proc.returncode != 0:

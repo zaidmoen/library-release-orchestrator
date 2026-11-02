@@ -72,8 +72,9 @@ def parse_skill_arguments(raw: str) -> SkillIntake:
             setattr(intake, _VALUE_FLAGS[token], tokens[i + 1])
             i += 1
         elif token.startswith("--"):
-            raise InvalidInputError(f"Unknown option {token}",
-                                    details={"known": sorted([*_BOOL_FLAGS, *_VALUE_FLAGS])})
+            raise InvalidInputError(
+                f"Unknown option {token}", details={"known": sorted([*_BOOL_FLAGS, *_VALUE_FLAGS])}
+            )
         else:
             words.append(token)
         i += 1

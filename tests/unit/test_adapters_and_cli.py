@@ -12,7 +12,10 @@ from release_orchestrator.cli import main
 from release_orchestrator.config import CommandSpec
 from release_orchestrator.errors import BlockedError, ConfigError, ExitCode, IntegrationError
 from release_orchestrator.integrations.github import GitHubPullRequestProvider
-from release_orchestrator.integrations.pull_requests import LocalPullRequestProvider, PullRequestSpec
+from release_orchestrator.integrations.pull_requests import (
+    LocalPullRequestProvider,
+    PullRequestSpec,
+)
 from release_orchestrator.planning.manifest import validate_manifest
 from release_orchestrator.validation.runner import run_validation
 
@@ -47,8 +50,9 @@ class FakeGitHub:
 
 
 def _gh(transport):
-    return GitHubPullRequestProvider({"zaidlibrary": "acme/zaidlibrary"}, token="test-token",
-                                     transport=transport)
+    return GitHubPullRequestProvider(
+        {"zaidlibrary": "acme/zaidlibrary"}, token="test-token", transport=transport
+    )
 
 
 def test_github_creates_draft_pr_only():
@@ -63,8 +67,9 @@ def test_github_creates_draft_pr_only():
 
 
 def test_github_returns_existing_pr():
-    fake = FakeGitHub(existing=[{"number": 3, "html_url": "u", "state": "open",
-                                 "base": {"ref": "main"}}])
+    fake = FakeGitHub(
+        existing=[{"number": 3, "html_url": "u", "state": "open", "base": {"ref": "main"}}]
+    )
     ref = _gh(fake).ensure(SPEC)
     assert not ref.created and ref.identifier == "3"
     assert all(m == "GET" for m, _, _ in fake.calls)
@@ -119,7 +124,9 @@ def test_validation_not_configured_is_not_passed(tmp_path):
 
 
 def test_validation_timeout(tmp_path):
-    spec = CommandSpec("slow", (sys.executable, "-c", "import time; time.sleep(5)"), timeout_seconds=1)
+    spec = CommandSpec(
+        "slow", (sys.executable, "-c", "import time; time.sleep(5)"), timeout_seconds=1
+    )
     report = run_validation((spec,), scope="library", cwd=tmp_path, library_path=tmp_path)
     assert report.results[0].status == "TIMED_OUT" and not report.passed
 
@@ -137,8 +144,9 @@ def test_cli_end_to_end_and_exit_codes(tmp_path, capsys):
     cfg = ["--config", out["result"]["config"]]
     plan = tmp_path / "plan.json"
 
-    code, out = _cli(capsys, *cfg, "plan", "--request", "Release Change B before Change A",
-                     "--out", str(plan))
+    code, out = _cli(
+        capsys, *cfg, "plan", "--request", "Release Change B before Change A", "--out", str(plan)
+    )
     assert code == ExitCode.OK and out["result"]["status"] == "PLAN_READY"
     assert out["result"]["plan"]["request"]["deferred_keys"] == ["FIN-198"]
 
@@ -170,8 +178,14 @@ def test_cli_invalid_input_exit_codes(tmp_path, capsys):
 
 def test_cli_ambiguous_request_exit_code(tmp_path, capsys):
     _, out = _cli(capsys, "demo-init", "--dest", str(tmp_path / "d"))
-    code, out = _cli(capsys, "--config", out["result"]["config"], "analyze",
-                     "--request", "release the thing Anas did")
+    code, out = _cli(
+        capsys,
+        "--config",
+        out["result"]["config"],
+        "analyze",
+        "--request",
+        "release the thing Anas did",
+    )
     assert code == ExitCode.AMBIGUOUS_OR_NOT_FOUND
     assert out["error"]["code"] == "AMBIGUOUS_REQUEST"
 

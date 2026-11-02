@@ -77,9 +77,7 @@ class BlockedError(OrchestratorError):
     code = "BLOCKED"
     exit_code = ExitCode.BLOCKED
 
-    def __init__(
-        self, message: str, *, reason: str, details: dict[str, Any] | None = None
-    ) -> None:
+    def __init__(self, message: str, *, reason: str, details: dict[str, Any] | None = None) -> None:
         super().__init__(message, details=details)
         self.reason = reason
 

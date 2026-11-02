@@ -60,15 +60,26 @@ class LocalPullRequestProvider:
 
     def _record(self, spec: PullRequestSpec) -> Path:
         digest = hashlib.sha256(f"{spec.repository}\0{spec.head}".encode()).hexdigest()[:8]
-        return self.root / _SAFE.sub("_", spec.repository) / f"{_SAFE.sub('_', spec.head)}-{digest}.json"
+        return (
+            self.root
+            / _SAFE.sub("_", spec.repository)
+            / f"{_SAFE.sub('_', spec.head)}-{digest}.json"
+        )
 
     def ensure(self, spec: PullRequestSpec) -> PullRequestRef:
         path = self._record(spec)
         identifier = f"{spec.repository}#{path.stem.rsplit('-', 1)[-1]}"
         if path.is_file():
             data = json.loads(path.read_text(encoding="utf-8"))
-            return PullRequestRef(spec.repository, identifier, path.as_uri(), spec.head,
-                                  data["base"], data["state"], created=False)
+            return PullRequestRef(
+                spec.repository,
+                identifier,
+                path.as_uri(),
+                spec.head,
+                data["base"],
+                data["state"],
+                created=False,
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         record = {**asdict(spec), "state": "open-draft" if spec.draft else "open"}
         try:
@@ -77,10 +88,19 @@ class LocalPullRequestProvider:
             return self.ensure(spec)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(record, handle, indent=2)
-        return PullRequestRef(spec.repository, identifier, path.as_uri(), spec.head, spec.base,
-                              record["state"], created=True)
+        return PullRequestRef(
+            spec.repository,
+            identifier,
+            path.as_uri(),
+            spec.head,
+            spec.base,
+            record["state"],
+            created=True,
+        )
 
     def list(self) -> list[dict[str, Any]]:
         if not self.root.is_dir():
             return []
-        return [json.loads(p.read_text(encoding="utf-8")) for p in sorted(self.root.rglob("*.json"))]
+        return [
+            json.loads(p.read_text(encoding="utf-8")) for p in sorted(self.root.rglob("*.json"))
+        ]

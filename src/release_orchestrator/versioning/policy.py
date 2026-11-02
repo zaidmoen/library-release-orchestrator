@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from release_orchestrator.models import BumpLevel, CommitInfo
 from release_orchestrator.versioning.semver import SemVer
 
+INITIAL_VERSION = SemVer(0, 1, 0)
 _CC_RE = re.compile(r"^(?:[A-Z][A-Z0-9]+-\d+:?\s*)?(?P<type>[a-z]+)(?:\([^)]*\))?(?P<bang>!)?:")
 _BREAKING_RE = re.compile(r"^BREAKING[ -]CHANGE:", re.MULTILINE)
 
@@ -53,7 +54,7 @@ def recommend_version(
     published: Iterable[SemVer],
     tagged: Iterable[SemVer],
     api_removals: Iterable[str] = (),
-    initial: SemVer = SemVer(0, 1, 0),
+    initial: SemVer = INITIAL_VERSION,
 ) -> VersionDecision:
     level = BumpLevel.PATCH
     reasons: list[str] = []

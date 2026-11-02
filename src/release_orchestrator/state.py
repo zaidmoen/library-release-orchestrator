@@ -62,19 +62,29 @@ class RunState:
         if target not in TRANSITIONS[self.state]:
             raise InvalidTransitionError(
                 f"Cannot move from {self.state} to {target}",
-                details={"from": str(self.state), "to": str(target),
-                         "allowed": sorted(str(s) for s in TRANSITIONS[self.state])},
+                details={
+                    "from": str(self.state),
+                    "to": str(target),
+                    "allowed": sorted(str(s) for s in TRANSITIONS[self.state]),
+                },
             )
-        self.history.append({"at": _now(), "from": str(self.state), "to": str(target),
-                             "note": note})
+        self.history.append(
+            {"at": _now(), "from": str(self.state), "to": str(target), "note": note}
+        )
         self.state = target
 
     def record(self, step: str, result: Any) -> None:
         self.steps[step] = {"at": _now(), "result": result}
 
     def to_dict(self) -> dict[str, Any]:
-        return {"plan_id": self.plan_id, "library": self.library, "version": self.version,
-                "state": str(self.state), "history": self.history, "steps": self.steps}
+        return {
+            "plan_id": self.plan_id,
+            "library": self.library,
+            "version": self.version,
+            "state": str(self.state),
+            "history": self.history,
+            "steps": self.steps,
+        }
 
 
 class RunStore:
@@ -91,8 +101,14 @@ class RunStore:
         if not path.is_file():
             return None
         data = json.loads(path.read_text(encoding="utf-8"))
-        return RunState(data["plan_id"], data["library"], data["version"],
-                        RunStatus(data["state"]), data["history"], data["steps"])
+        return RunState(
+            data["plan_id"],
+            data["library"],
+            data["version"],
+            RunStatus(data["state"]),
+            data["history"],
+            data["steps"],
+        )
 
     def save(self, run: RunState) -> None:
         self.dir.mkdir(parents=True, exist_ok=True)

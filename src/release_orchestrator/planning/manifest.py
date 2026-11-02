@@ -38,8 +38,17 @@ def validate_manifest(data: Any) -> list[str]:
         return ["manifest root must be an object"]
     if data.get("schema_version") != SCHEMA_VERSION:
         errors.append(f"schema_version must be {SCHEMA_VERSION}")
-    for key in ("plan_id", "status", "library", "request", "release", "included_changes",
-                "excluded_changes", "approval", "validation"):
+    for key in (
+        "plan_id",
+        "status",
+        "library",
+        "request",
+        "release",
+        "included_changes",
+        "excluded_changes",
+        "approval",
+        "validation",
+    ):
         if key not in data:
             errors.append(f"missing required field '{key}'")
     if errors:
@@ -121,13 +130,15 @@ def check_plan_against_config(plan: ReleasePlan, config: Config) -> None:
     problems = []
     if plan.library != config.library.name:
         problems.append(f"plan is for library '{plan.library}', config is '{config.library.name}'")
-    expected = expected_validation(config, [c["name"] for c in plan.consumers
-                                            if c["action"] == "update"])
+    expected = expected_validation(
+        config, [c["name"] for c in plan.consumers if c["action"] == "update"]
+    )
     if plan.validation_required != expected:
         problems.append("validation commands in the plan differ from the trusted config")
     if problems:
-        raise ManifestError("Plan does not match the trusted configuration",
-                            details={"errors": problems})
+        raise ManifestError(
+            "Plan does not match the trusted configuration", details={"errors": problems}
+        )
 
 
 def expected_validation(config: Config, consumer_names: list[str]) -> list[dict[str, Any]]:
@@ -139,8 +150,13 @@ def expected_validation(config: Config, consumer_names: list[str]) -> list[dict[
 
 
 def _req(scope: str, spec: CommandSpec) -> dict[str, Any]:
-    return {"scope": scope, "name": spec.name, "argv": list(spec.argv), "env": dict(spec.env),
-            "timeout_seconds": spec.timeout_seconds}
+    return {
+        "scope": scope,
+        "name": spec.name,
+        "argv": list(spec.argv),
+        "env": dict(spec.env),
+        "timeout_seconds": spec.timeout_seconds,
+    }
 
 
 @dataclass
@@ -157,17 +173,26 @@ class VerificationReport:
             self.ok = False
 
     def to_dict(self) -> dict[str, Any]:
-        return {"ok": self.ok, "branch": self.branch, "head": self.head,
-                "checks": self.checks, "provenance": self.provenance}
+        return {
+            "ok": self.ok,
+            "branch": self.branch,
+            "head": self.head,
+            "checks": self.checks,
+            "provenance": self.provenance,
+        }
 
 
 def version_commit_message(plan: ReleasePlan) -> str:
     keys = ", ".join(plan.included_keys)
-    return (f"chore(release): {plan.library} {plan.proposed_version}\n\n"
-            f"Includes: {keys}\nRelease-Plan: {plan.plan_id}\n")
+    return (
+        f"chore(release): {plan.library} {plan.proposed_version}\n\n"
+        f"Includes: {keys}\nRelease-Plan: {plan.plan_id}\n"
+    )
 
 
-def verify_release_branch(git: Git, plan: ReleasePlan, ref: str | None = None) -> VerificationReport:
+def verify_release_branch(
+    git: Git, plan: ReleasePlan, ref: str | None = None
+) -> VerificationReport:
     ref = ref or plan.branch
     head = git.try_rev_parse(ref)
     report = VerificationReport(ok=True, branch=ref, head=head)
@@ -180,24 +205,35 @@ def verify_release_branch(git: Git, plan: ReleasePlan, ref: str | None = None) -
         return report
     report.add("based_on_planned_base", True, plan.base_revision)
 
-    commits = [git.commit_info(sha) for sha in git.rev_list(f"{plan.base_revision}..{head}",
-                                                            no_merges=False)]
+    commits = [
+        git.commit_info(sha)
+        for sha in git.rev_list(f"{plan.base_revision}..{head}", no_merges=False)
+    ]
     expected = plan.included_commits
     expect_version_commit = plan.version_file is not None
     expected_count = len(expected) + (1 if expect_version_commit else 0)
-    report.add("commit_count", len(commits) == expected_count,
-               f"expected {expected_count}, found {len(commits)}")
+    report.add(
+        "commit_count",
+        len(commits) == expected_count,
+        f"expected {expected_count}, found {len(commits)}",
+    )
     if any(len(c.parents) > 1 for c in commits):
         report.add("no_merge_commits", False, "release branch contains merge commits")
 
     for planned, actual in zip(expected, commits, strict=False):
         source = _PICKED_RE.findall(actual.body)
         ok = bool(source) and source[-1] == planned.sha
-        report.add(f"provenance:{planned.sha[:10]}", ok,
-                   f"{actual.sha[:10]} cherry-picked from {source[-1][:10] if source else 'nothing'}")
+        report.add(
+            f"provenance:{planned.sha[:10]}",
+            ok,
+            f"{actual.sha[:10]} cherry-picked from {source[-1][:10] if source else 'nothing'}",
+        )
         patch_ok = git.patch_id(actual.sha) == planned.release_patch_id
-        report.add(f"content:{planned.sha[:10]}", patch_ok,
-                   "patch-id matches" if patch_ok else "patch-id differs from the planned commit")
+        report.add(
+            f"content:{planned.sha[:10]}",
+            patch_ok,
+            "patch-id matches" if patch_ok else "patch-id differs from the planned commit",
+        )
         report.provenance.append({"source": planned.sha, "result": actual.sha})
 
     if expect_version_commit and len(commits) == expected_count:
@@ -205,7 +241,12 @@ def verify_release_branch(git: Git, plan: ReleasePlan, ref: str | None = None) -
         files = [f.path for f in last.files]
         ok_files = files == [plan.version_file]
         content = git.show_file(last.sha, str(plan.version_file)) or ""
-        ok_version = f'"{plan.proposed_version}"' in content or f"'{plan.proposed_version}'" in content
-        report.add("version_commit", ok_files and ok_version,
-                   f"touches {files}; sets version {plan.proposed_version}: {ok_version}")
+        ok_version = (
+            f'"{plan.proposed_version}"' in content or f"'{plan.proposed_version}'" in content
+        )
+        report.add(
+            "version_commit",
+            ok_files and ok_version,
+            f"touches {files}; sets version {plan.proposed_version}: {ok_version}",
+        )
     return report

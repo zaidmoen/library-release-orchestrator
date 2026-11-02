@@ -210,8 +210,14 @@ def _commands(raw: Any, where: str) -> tuple[CommandSpec, ...]:
         timeout = entry.get("timeout_seconds", 600)
         if not isinstance(timeout, int) or not 1 <= timeout <= 3600:
             raise ConfigError(f"{where}: timeout_seconds must be an integer in [1, 3600]")
-        specs.append(CommandSpec(name=_name(entry, "name"), argv=tuple(argv),
-                                 timeout_seconds=timeout, env=tuple(sorted(env.items()))))
+        specs.append(
+            CommandSpec(
+                name=_name(entry, "name"),
+                argv=tuple(argv),
+                timeout_seconds=timeout,
+                env=tuple(sorted(env.items())),
+            )
+        )
     return tuple(specs)
 
 

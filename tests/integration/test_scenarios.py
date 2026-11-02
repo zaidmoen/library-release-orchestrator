@@ -74,7 +74,8 @@ def test_normal_release_all_changes(demo_factory):
     assert plan.status == "PLAN_READY" and plan.excluded == []
     assert _release(demo, plan)["status"] == "published"
     assert demo.git("ZaidLibrary", "rev-parse", "v1.1.0") == demo.git(
-        "ZaidLibrary", "rev-parse", "release/1.1.0")
+        "ZaidLibrary", "rev-parse", "release/1.1.0"
+    )
 
 
 def test_prepare_does_not_touch_user_worktree(demo_factory):
@@ -127,8 +128,10 @@ def test_scenario_c_conflict_detected_and_repo_preserved(demo_factory):
     assert conflict["depends_on"] == "FIN-198"
     probe = plan.analysis["probe"]
     assert probe["conflicted_files"] == ["src/zaidlibrary/payments.py"]
-    assert {r["option"] for r in plan.remediation} >= {"backport_commit",
-                                                       "include_conflicting_changes"}
+    assert {r["option"] for r in plan.remediation} >= {
+        "backport_commit",
+        "include_conflicting_changes",
+    }
     assert snapshot_repo(demo.lib) == before
 
 
@@ -261,8 +264,7 @@ def test_verify_detects_extra_commit(demo_factory):
     wt = demo.root / "tamper"
     demo.git("ZaidLibrary", "worktree", "add", str(wt), "release/1.1.0")
     sha_a = demo.git("ZaidLibrary", "log", "--format=%H", "--grep=FIN-198", "main")
-    demo.git(wt, "-c", "user.name=x", "-c", "user.email=x@example.invalid",
-             "cherry-pick", sha_a)
+    demo.git(wt, "-c", "user.name=x", "-c", "user.email=x@example.invalid", "cherry-pick", sha_a)
     report = verify_release_branch(demo.orch.s.git, plan)
     assert report.ok is False
     failed = {c["check"] for c in report.checks if not c["ok"]}
@@ -280,7 +282,8 @@ def test_existing_branch_with_other_content_is_never_overwritten(demo_factory):
         demo.orch.prepare(plan, approve=True, dry_run=False)
     assert exc.value.reason == "BRANCH_EXISTS_MISMATCH"
     assert demo.git("ZaidLibrary", "rev-parse", "release/1.1.0") == demo.git(
-        "ZaidLibrary", "rev-parse", "main")
+        "ZaidLibrary", "rev-parse", "main"
+    )
 
 
 def test_recovery_after_failed_prepare(demo_factory):

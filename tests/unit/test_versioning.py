@@ -22,37 +22,56 @@ def test_parse_rejects_invalid(text):
 
 
 def test_precedence_matches_semver_spec():
-    ordered = ["1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
-               "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "1.0.1", "1.10.0"]
+    ordered = [
+        "1.0.0-alpha",
+        "1.0.0-alpha.1",
+        "1.0.0-alpha.beta",
+        "1.0.0-beta",
+        "1.0.0-beta.2",
+        "1.0.0-beta.11",
+        "1.0.0-rc.1",
+        "1.0.0",
+        "1.0.1",
+        "1.10.0",
+    ]
     parsed = [SemVer.parse(v) for v in ordered]
     assert sorted(reversed(parsed)) == parsed
     assert SemVer.parse("1.0.0+a") == SemVer.parse("1.0.0+b")
 
 
-@pytest.mark.parametrize(("subject", "body", "level"), [
-    ("FIN-1: feat: add x", "", BumpLevel.MINOR),
-    ("fix(payments): y", "", BumpLevel.PATCH),
-    ("feat!: drop z", "", BumpLevel.MAJOR),
-    ("refactor: q", "BREAKING CHANGE: removed q", BumpLevel.MAJOR),
-    ("random words", "", BumpLevel.PATCH),
-])
+@pytest.mark.parametrize(
+    ("subject", "body", "level"),
+    [
+        ("FIN-1: feat: add x", "", BumpLevel.MINOR),
+        ("fix(payments): y", "", BumpLevel.PATCH),
+        ("feat!: drop z", "", BumpLevel.MAJOR),
+        ("refactor: q", "BREAKING CHANGE: removed q", BumpLevel.MAJOR),
+        ("random words", "", BumpLevel.PATCH),
+    ],
+)
 def test_bump_for_commit(subject, body, level):
     assert bump_for_commit(commit(subject, body))[0] is level
 
 
 def test_version_from_highest_published_not_base():
-    decision = recommend_version([commit("feat: a")], published=[SemVer.parse("1.1.0")],
-                                 tagged=[SemVer.parse("1.0.0")])
+    decision = recommend_version(
+        [commit("feat: a")], published=[SemVer.parse("1.1.0")], tagged=[SemVer.parse("1.0.0")]
+    )
     assert str(decision.proposed) == "1.2.0" and not decision.collides
 
 
 def test_prerelease_tags_do_not_count_as_released():
-    decision = recommend_version([commit("fix: a")], published=[SemVer.parse("1.0.0")],
-                                 tagged=[SemVer.parse("1.0.1-rc.1")])
+    decision = recommend_version(
+        [commit("fix: a")], published=[SemVer.parse("1.0.0")], tagged=[SemVer.parse("1.0.1-rc.1")]
+    )
     assert str(decision.proposed) == "1.0.1" and not decision.collides
 
 
 def test_removed_public_symbol_forces_major():
-    decision = recommend_version([commit("fix: tidy")], published=[SemVer.parse("1.4.2")],
-                                 tagged=[], api_removals=["zaidlibrary.payments.calculate_total"])
+    decision = recommend_version(
+        [commit("fix: tidy")],
+        published=[SemVer.parse("1.4.2")],
+        tagged=[],
+        api_removals=["zaidlibrary.payments.calculate_total"],
+    )
     assert decision.bump is BumpLevel.MAJOR and str(decision.proposed) == "2.0.0"

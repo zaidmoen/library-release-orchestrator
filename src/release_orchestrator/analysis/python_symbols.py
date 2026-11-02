@@ -60,19 +60,19 @@ def module_facts(tree: ast.Module, module: str, *, is_package: bool = False) -> 
                 if isinstance(target, ast.Name):
                     facts.definitions[target.id] = ast.dump(node)
                     facts.bindings[target.id] = (module, target.id)
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
+    for walked in ast.walk(tree):
+        if isinstance(walked, ast.Import):
+            for alias in walked.names:
                 facts.imported_modules.add(alias.name)
                 if alias.asname:
                     facts.bindings[alias.asname] = (alias.name, None)
                 else:
                     top = alias.name.split(".")[0]
                     facts.bindings[top] = (top, None)
-        elif isinstance(node, ast.ImportFrom):
-            base = _resolve_from(node, package)
+        elif isinstance(walked, ast.ImportFrom):
+            base = _resolve_from(walked, package)
             facts.imported_modules.add(base)
-            for alias in node.names:
+            for alias in walked.names:
                 if alias.name == "*":
                     continue
                 bound = alias.asname or alias.name

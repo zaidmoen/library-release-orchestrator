@@ -30,10 +30,15 @@ class ConsumerUpdateResult:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "consumer": self.consumer, "branch": self.branch, "status": self.status,
-            "head": self.head, "from_version": self.from_version, "to_version": self.to_version,
+            "consumer": self.consumer,
+            "branch": self.branch,
+            "status": self.status,
+            "head": self.head,
+            "from_version": self.from_version,
+            "to_version": self.to_version,
             "validation": self.validation.to_dict() if self.validation else None,
-            "pull_request": self.pull_request, "notes": self.notes,
+            "pull_request": self.pull_request,
+            "notes": self.notes,
         }
 
 
@@ -47,7 +52,10 @@ def rewrite_pin(text: str, library: str, version: str) -> str:
         raise BlockedError(f"No '==' pin for {library} found", reason="PIN_NOT_FOUND")
     lines = text.splitlines(keepends=True)
     line = lines[req.line_no]
-    lines[req.line_no] = re.sub(r"(==\s*)[^\s;#,]+", lambda m: m.group(1) + version, line, count=1)
+    match = re.search(r"(==\s*)[^\s;#,]+", line)
+    if match is None:
+        raise BlockedError(f"No '==' pin for {library} found", reason="PIN_NOT_FOUND")
+    lines[req.line_no] = line[: match.end(1)] + version + line[match.end() :]
     return "".join(lines)
 
 
@@ -72,15 +80,18 @@ def prepare_consumer_update(
         if req is None or req.version != to_version:
             raise BlockedError(
                 f"{consumer.name}: branch '{branch}' exists but does not pin {to_version}",
-                reason="BRANCH_EXISTS_MISMATCH", details={"branch": branch},
+                reason="BRANCH_EXISTS_MISMATCH",
+                details={"branch": branch},
             )
         result.status, result.head = "already_prepared", git.rev_parse(branch)
         result.validation = _validate(git, result.head, consumer, library_dir)
         return result
 
     base = git.rev_parse(consumer.source_ref)
-    message = (f"build(deps): bump {library} from {from_version} to {to_version}\n\n"
-               f"Refs: {', '.join(change_keys)}\n")
+    message = (
+        f"build(deps): bump {library} from {from_version} to {to_version}\n\n"
+        f"Refs: {', '.join(change_keys)}\n"
+    )
     with temp_dir("lro-consumer-") as tmp:
         if dry_run:
             work = clone_no_checkout(git.path, tmp / "sandbox")
@@ -91,7 +102,8 @@ def prepare_consumer_update(
             dep_file = work.path / consumer.dependency_file
             dep_file.write_text(
                 rewrite_pin(dep_file.read_text(encoding="utf-8"), library, to_version),
-                encoding="utf-8", newline="\n",
+                encoding="utf-8",
+                newline="\n",
             )
             head = work.commit_all(message)
             result.validation = _validate(work, head, consumer, library_dir)
@@ -114,5 +126,6 @@ def prepare_consumer_update(
 def _validate(git: Git, rev: str, consumer: ConsumerConfig, library_dir: Path) -> ValidationReport:
     with temp_dir("lro-consumer-check-") as tmp:
         git.archive_to(rev, tmp)
-        return run_validation(consumer.validation, scope=consumer.name, cwd=tmp,
-                              library_path=library_dir)
+        return run_validation(
+            consumer.validation, scope=consumer.name, cwd=tmp, library_path=library_dir
+        )

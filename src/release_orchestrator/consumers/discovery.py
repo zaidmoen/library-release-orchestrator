@@ -11,7 +11,9 @@ from release_orchestrator.config import ConsumerConfig
 from release_orchestrator.gitutil.repo import Git
 from release_orchestrator.versioning.semver import SemVer
 
-_REQ_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*([=<>!~]=?)?\s*([^\s;#,]*)")
+_REQ_RE = re.compile(
+    r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*(?:\[[^\]]*\])?\s*([=<>!~]=?)?\s*([^\s;#,]*)"
+)
 
 
 def normalize(name: str) -> str:
@@ -106,13 +108,12 @@ def assess_consumer(
     target.imported_modules = sorted(imported)
     impacted = top_package in imported or any(
         m == a or m.startswith(a + ".") or a.startswith(m + ".")
-        for m in imported for a in affected_modules
+        for m in imported
+        for a in affected_modules
     )
     if requested_by_ticket:
         targeted = consumer.name in requested_by_ticket
-        target.reasons.append(
-            "requested by ticket" if targeted else "not requested by ticket(s)"
-        )
+        target.reasons.append("requested by ticket" if targeted else "not requested by ticket(s)")
         if targeted and not impacted:
             target.reasons.append("note: no import of the changed modules was found")
         if not targeted and impacted:

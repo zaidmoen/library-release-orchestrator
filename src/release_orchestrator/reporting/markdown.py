@@ -49,8 +49,11 @@ def render_plan(plan: ReleasePlan) -> str:
         lines.append("No findings. Static analysis found no dependency on excluded changes.")
     probe = plan.analysis.get("probe") or {}
     if probe:
-        lines += ["", f"Sandbox apply probe: {'clean' if probe.get('applied_cleanly') else 'CONFLICT'}"
-                  f" ({probe.get('note', '')})"]
+        lines += [
+            "",
+            f"Sandbox apply probe: {'clean' if probe.get('applied_cleanly') else 'CONFLICT'}"
+            f" ({probe.get('note', '')})",
+        ]
 
     if plan.blockers:
         lines += ["", "## Blockers", ""]
@@ -61,8 +64,13 @@ def render_plan(plan: ReleasePlan) -> str:
             extra = f" → `{', '.join(r['changes'])}`" if r.get("changes") else ""
             lines.append(f"- **{r['option']}**{extra}: {r['description']}")
 
-    lines += ["", "## Consumers", "", "| Service | Current | Proposed | Action | Why |",
-              "|---|---|---|---|---|"]
+    lines += [
+        "",
+        "## Consumers",
+        "",
+        "| Service | Current | Proposed | Action | Why |",
+        "|---|---|---|---|---|",
+    ]
     lines += [
         f"| {c['name']} | {c.get('current_version') or '-'} | {c['proposed_version']} "
         f"| {c['action']} | {'; '.join(c.get('reasons', []))} |"
@@ -72,24 +80,38 @@ def render_plan(plan: ReleasePlan) -> str:
         lines += ["", "## Compatibility risks", ""]
         lines += [f"- {r}" for r in plan.compatibility_risks]
     lines += ["", "## Validation required", ""]
-    lines += [f"- `{r['scope']}` / {r['name']}: `{' '.join(r['argv'])}`"
-              for r in plan.validation_required] or ["- none configured"]
-    lines += ["", "## Approval", "",
-              "Human approval (`--approve`) is required for: prepare, pr, publish, "
-              "update-consumers. Nothing is ever merged or deployed automatically.", ""]
+    lines += [
+        f"- `{r['scope']}` / {r['name']}: `{' '.join(r['argv'])}`" for r in plan.validation_required
+    ] or ["- none configured"]
+    lines += [
+        "",
+        "## Approval",
+        "",
+        "Human approval (`--approve`) is required for: prepare, pr, publish, "
+        "update-consumers. Nothing is ever merged or deployed automatically.",
+        "",
+    ]
     return "\n".join(lines)
 
 
 def render_run_report(plan: ReleasePlan, run: dict[str, Any]) -> str:
-    lines = [render_plan(plan), "## Execution", "", f"**Run state:** `{run['state']}`", "",
-             "| At | From | To | Note |", "|---|---|---|---|"]
+    lines = [
+        render_plan(plan),
+        "## Execution",
+        "",
+        f"**Run state:** `{run['state']}`",
+        "",
+        "| At | From | To | Note |",
+        "|---|---|---|---|",
+    ]
     lines += [f"| {h['at']} | {h['from']} | {h['to']} | {h['note']} |" for h in run["history"]]
     steps = run.get("steps", {})
     prepared = steps.get("prepare", {}).get("result", {})
     if prepared.get("provenance"):
         lines += ["", "### Provenance (source → release commit)", ""]
-        lines += [f"- `{_short(p['source'])}` → `{_short(p['result'])}`"
-                  for p in prepared["provenance"]]
+        lines += [
+            f"- `{_short(p['source'])}` → `{_short(p['result'])}`" for p in prepared["provenance"]
+        ]
     for key in ("validate", "publish"):
         if key in steps:
             lines += ["", f"### {key}", "", "```json", _json(steps[key]["result"]), "```"]

@@ -24,8 +24,12 @@ class PublishedArtifact:
     metadata: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "version": self.version, "sha256": self.sha256,
-                "metadata": self.metadata}
+        return {
+            "name": self.name,
+            "version": self.version,
+            "sha256": self.sha256,
+            "metadata": self.metadata,
+        }
 
 
 class PackageRegistry(Protocol):
@@ -105,8 +109,10 @@ class LocalRegistry:
                 return existing, False
             raise ImmutableVersionError(
                 f"{name} {version} is already published with different content",
-                details={"existing_sha256": existing.sha256 if existing else None,
-                         "attempted_sha256": digest},
+                details={
+                    "existing_sha256": existing.sha256 if existing else None,
+                    "attempted_sha256": digest,
+                },
             ) from None
         # We own the version now. Write payload first, then the record body.
         (directory / f"{version}.tar").write_bytes(payload)

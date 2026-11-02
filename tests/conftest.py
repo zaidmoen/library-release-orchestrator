@@ -25,8 +25,9 @@ class Demo:
 
     def git(self, repo: str | Path, *args: str) -> str:
         path = repo if isinstance(repo, Path) else self.root / repo
-        return subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True,
-                              check=True).stdout.strip()
+        return subprocess.run(
+            ["git", "-C", str(path), *args], capture_output=True, text=True, check=True
+        ).stdout.strip()
 
     def plan(self, *tickets: str, **kw: str):  # type: ignore[no-untyped-def]
         return self.orch.plan(RequestInput(tickets=tickets, **kw))
@@ -43,9 +44,14 @@ def demo_factory(tmp_path: Path) -> Callable[[str], Demo]:
 
 def snapshot_repo(path: Path) -> dict[str, str]:
     """Everything a mutation could change: refs, worktrees, status and every .git file."""
+
     def run(*args: str) -> str:
-        return subprocess.run(["git", "--no-optional-locks", "-C", str(path), *args],
-                              capture_output=True, text=True, check=True).stdout
+        return subprocess.run(
+            ["git", "--no-optional-locks", "-C", str(path), *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
 
     files = {}
     for item in sorted((path / ".git").rglob("*")):

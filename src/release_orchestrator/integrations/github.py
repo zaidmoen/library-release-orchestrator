@@ -89,21 +89,44 @@ class GitHubPullRequestProvider:
             raise BlockedError(
                 f"Branch '{spec.head}' is not on the remote yet",
                 reason="BRANCH_NOT_PUSHED",
-                details={"push_command": f"git push origin refs/heads/{spec.head}",
-                         "note": "Push is a human step; the orchestrator never pushes."},
+                details={
+                    "push_command": f"git push origin refs/heads/{spec.head}",
+                    "note": "Push is a human step; the orchestrator never pushes.",
+                },
             )
         query = urllib.parse.urlencode({"head": f"{owner}:{spec.head}", "state": "open"})
         status, existing = self._call("GET", f"/repos/{full}/pulls?{query}")
         if status == 200 and isinstance(existing, list) and existing:
             pr = existing[0]
-            return PullRequestRef(spec.repository, str(pr["number"]), pr["html_url"], spec.head,
-                                  pr["base"]["ref"], pr["state"], created=False)
-        status, pr = self._call("POST", f"/repos/{full}/pulls", {
-            "title": spec.title, "head": spec.head, "base": spec.base, "body": spec.body,
-            "draft": True,
-        })
+            return PullRequestRef(
+                spec.repository,
+                str(pr["number"]),
+                pr["html_url"],
+                spec.head,
+                pr["base"]["ref"],
+                pr["state"],
+                created=False,
+            )
+        status, pr = self._call(
+            "POST",
+            f"/repos/{full}/pulls",
+            {
+                "title": spec.title,
+                "head": spec.head,
+                "base": spec.base,
+                "body": spec.body,
+                "draft": True,
+            },
+        )
         if status != 201:
             message = pr.get("message", "") if isinstance(pr, dict) else ""
             raise IntegrationError(f"Creating PR failed with {status}: {message}")
-        return PullRequestRef(spec.repository, str(pr["number"]), pr["html_url"], spec.head,
-                              spec.base, pr["state"], created=True)
+        return PullRequestRef(
+            spec.repository,
+            str(pr["number"]),
+            pr["html_url"],
+            spec.head,
+            spec.base,
+            pr["state"],
+            created=True,
+        )

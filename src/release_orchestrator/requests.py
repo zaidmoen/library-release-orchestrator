@@ -39,7 +39,9 @@ def resolve_ticket(key: str, *, key_pattern: str, tracker: IssueTracker) -> Reso
         raise InvalidInputError(f"'{key}' does not look like a change key ({key_pattern})")
     notes: list[str] = []
     if tracker.keys() and tracker.get(key) is None:
-        raise NotFoundError(f"Ticket {key} was not found in the issue tracker", details={"key": key})
+        raise NotFoundError(
+            f"Ticket {key} was not found in the issue tracker", details={"key": key}
+        )
     if not tracker.keys():
         notes.append("No issue tracker configured; ticket existence not verified")
     return ResolvedRequest("ticket", key, (key,), notes=tuple(notes))
@@ -71,8 +73,11 @@ def resolve_text(
     if not mentions:
         raise AmbiguousRequestError(
             "No change key or known alias found in the request",
-            details={"request": text, "known_aliases": sorted(aliases),
-                     "known_tickets": tracker.keys()},
+            details={
+                "request": text,
+                "known_aliases": sorted(aliases),
+                "known_tickets": tracker.keys(),
+            },
         )
     split = _BEFORE_RE.search(text)
     requested: list[str] = []
@@ -82,13 +87,16 @@ def resolve_text(
         if key not in requested and key not in deferred:
             bucket.append(key)
     if not requested:
-        raise AmbiguousRequestError("The request names only changes to defer", details={"request": text})
+        raise AmbiguousRequestError(
+            "The request names only changes to defer", details={"request": text}
+        )
     if tracker.keys():
         unknown = [k for k in requested + deferred if tracker.get(k) is None]
         if unknown:
-            raise NotFoundError(f"Unknown ticket(s): {', '.join(unknown)}", details={"keys": unknown})
-    notes = [f"Interpreted as: release {requested}"
-             + (f" without {deferred}" if deferred else "")]
+            raise NotFoundError(
+                f"Unknown ticket(s): {', '.join(unknown)}", details={"keys": unknown}
+            )
+    notes = [f"Interpreted as: release {requested}" + (f" without {deferred}" if deferred else "")]
     return ResolvedRequest("text", text, tuple(requested), tuple(deferred), tuple(notes))
 
 
@@ -99,7 +107,9 @@ def resolve_commits(shas: list[str], scan: HistoryScan) -> ResolvedRequest:
         if not _SHA_RE.match(sha):
             raise InvalidInputError(f"'{sha}' is not a commit SHA")
         prefix = sha.lower()
-        owner = [k for k, unit in scan.changes.items() if any(s.startswith(prefix) for s in unit.shas)]
+        owner = [
+            k for k, unit in scan.changes.items() if any(s.startswith(prefix) for s in unit.shas)
+        ]
         if not owner:
             raise NotFoundError(
                 f"Commit {sha} is not a pending, mapped commit between "
@@ -112,6 +122,7 @@ def resolve_commits(shas: list[str], scan: HistoryScan) -> ResolvedRequest:
         if owner[0] not in keys:
             keys.append(owner[0])
     partial = [k for k in keys if set(scan.changes[k].shas) - matched]
-    notes = [f"{k}: the whole logical change is released, not only the listed commits"
-             for k in partial]
+    notes = [
+        f"{k}: the whole logical change is released, not only the listed commits" for k in partial
+    ]
     return ResolvedRequest("commits", " ".join(shas), tuple(keys), notes=tuple(notes))

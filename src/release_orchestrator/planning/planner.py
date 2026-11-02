@@ -37,8 +37,11 @@ def resolve_base(config: Config, git: Git, override: str | None) -> str:
     if config.library.base_ref:
         return config.library.base_ref
     prefix = config.library.tag_prefix
-    tagged = [(v, t) for t in git.tags(f"{prefix}*")
-              if (v := SemVer.try_parse(t[len(prefix):])) and not v.is_prerelease]
+    tagged = [
+        (v, t)
+        for t in git.tags(f"{prefix}*")
+        if (v := SemVer.try_parse(t[len(prefix) :])) and not v.is_prerelease
+    ]
     if not tagged:
         raise ConfigError(
             "No release tag found to use as base; pass --base or set library.base_ref",
@@ -49,7 +52,7 @@ def resolve_base(config: Config, git: Git, override: str | None) -> str:
 
 def tagged_versions(config: Config, git: Git) -> list[SemVer]:
     prefix = config.library.tag_prefix
-    return [v for t in git.tags(f"{prefix}*") if (v := SemVer.try_parse(t[len(prefix):]))]
+    return [v for t in git.tags(f"{prefix}*") if (v := SemVer.try_parse(t[len(prefix) :]))]
 
 
 def build_plan(
@@ -90,8 +93,13 @@ def build_plan(
             key=k,
             title=_title(tracker, k, units[k].title),
             commits=tuple(
-                PlannedCommit(c.sha, c.subject, f"{c.author_name} <{c.author_email}>",
-                              scan.patch_ids.get(c.sha, ""), probe_ids.get(c.sha, ""))
+                PlannedCommit(
+                    c.sha,
+                    c.subject,
+                    f"{c.author_name} <{c.author_email}>",
+                    scan.patch_ids.get(c.sha, ""),
+                    probe_ids.get(c.sha, ""),
+                )
                 for c in units[k].commits
             ),
         )
@@ -99,10 +107,13 @@ def build_plan(
     ]
     excluded = [
         ExcludedChange(
-            key=k, title=_title(tracker, k, unit.title), commits=unit.shas,
+            key=k,
+            title=_title(tracker, k, unit.title),
+            commits=unit.shas,
             reason=_exclusion_reason(k, analysis, request),
         )
-        for k, unit in units.items() if k not in pending
+        for k, unit in units.items()
+        if k not in pending
     ]
 
     all_commits = [c for k in pending for c in units[k].commits]
@@ -124,30 +135,43 @@ def build_plan(
     top_package = config.library.package_dir.strip("/").rsplit("/", 1)[-1]
     consumers = [
         assess_consumer(
-            c, library=config.library.name, top_package=top_package,
-            affected_modules=affected, requested_by_ticket=requested_consumers & known,
+            c,
+            library=config.library.name,
+            top_package=top_package,
+            affected_modules=affected,
+            requested_by_ticket=requested_consumers & known,
             proposed=decision.proposed,
         ).to_dict()
         for c in config.consumers
     ]
 
     blockers: list[dict[str, Any]] = [
-        {"reason": str(f.kind), "message": f.message, "change": f.change,
-         "depends_on": f.depends_on}
+        {
+            "reason": str(f.kind),
+            "message": f.message,
+            "change": f.change,
+            "depends_on": f.depends_on,
+        }
         for f in analysis.blockers
     ]
     if decision.collides:
         blockers.append({"reason": "VERSION_COLLISION", "message": "; ".join(decision.collisions)})
     if not config.library_validation:
-        blockers.append({"reason": "NO_VALIDATION_CONFIGURED",
-                         "message": "No library validation commands are configured"})
+        blockers.append(
+            {
+                "reason": "NO_VALIDATION_CONFIGURED",
+                "message": "No library validation commands are configured",
+            }
+        )
 
     risks = [f.message for f in analysis.findings if f.severity is Severity.WARNING]
     if unknown_consumers:
         risks.append(f"Ticket names unknown consumers (ignored): {unknown_consumers}")
     if decision.bump.value == "major":
         risks.append("Major version: consumers must review breaking changes before upgrading")
-    risks += [f"{c['name']}: {'; '.join(c['reasons'])}" for c in consumers if c["action"] == "manual"]
+    risks += [
+        f"{c['name']}: {'; '.join(c['reasons'])}" for c in consumers if c["action"] == "manual"
+    ]
 
     plan = ReleasePlan(
         library=config.library.name,
@@ -169,7 +193,8 @@ def build_plan(
         consumers=consumers,
         compatibility_risks=risks,
         validation_required=expected_validation(
-            config, [c["name"] for c in consumers if c["action"] == "update"]),
+            config, [c["name"] for c in consumers if c["action"] == "update"]
+        ),
         remediation=_remediation(analysis, pending, decision.collides),
         blockers=blockers,
         status="BLOCKED" if blockers else "PLAN_READY",
@@ -206,42 +231,71 @@ def _exclusion_reason(key: str, analysis: AnalysisResult, request: ResolvedReque
     return "not requested"
 
 
-def _remediation(analysis: AnalysisResult, pending: list[str], collision: bool) -> list[dict[str, Any]]:
+def _remediation(
+    analysis: AnalysisResult, pending: list[str], collision: bool
+) -> list[dict[str, Any]]:
     options: list[dict[str, Any]] = []
     if analysis.verdict is Verdict.DEPENDENT:
         together = sorted(set(pending) | set(analysis.prerequisites))
         options += [
-            {"option": "include_prerequisites", "changes": together,
-             "description": "Release the requested change together with its prerequisites. "
-                            "Re-run plan with these keys."},
-            {"option": "extract_shared_part",
-             "description": "Move only the code the requested change needs out of the "
-                            "prerequisite into its own small change, release it first, then "
-                            "rebase the requested change on it."},
-            {"option": "feature_flag_prerequisite",
-             "description": "Ship the prerequisite disabled behind a feature flag in the same "
-                            "release, then enable it when the business approves."},
-            {"option": "release_in_development_order",
-             "description": "Release the prerequisite first, as developed."},
+            {
+                "option": "include_prerequisites",
+                "changes": together,
+                "description": "Release the requested change together with its prerequisites. "
+                "Re-run plan with these keys.",
+            },
+            {
+                "option": "extract_shared_part",
+                "description": "Move only the code the requested change needs out of the "
+                "prerequisite into its own small change, release it first, then "
+                "rebase the requested change on it.",
+            },
+            {
+                "option": "feature_flag_prerequisite",
+                "description": "Ship the prerequisite disabled behind a feature flag in the same "
+                "release, then enable it when the business approves.",
+            },
+            {
+                "option": "release_in_development_order",
+                "description": "Release the prerequisite first, as developed.",
+            },
         ]
     if analysis.verdict is Verdict.CONFLICT:
-        causes = sorted({str(c) for f in analysis.findings if f.kind.value == "GIT_CONFLICT"
-                         for c in f.evidence.get("suspected_causes", [])})
+        causes = sorted(
+            {
+                str(c)
+                for f in analysis.findings
+                if f.kind.value == "GIT_CONFLICT"
+                for c in f.evidence.get("suspected_causes", [])
+            }
+        )
         options += [
-            {"option": "backport_commit",
-             "description": "Have the change author create a backport commit of the requested "
-                            "change on the release base, resolving the conflict manually and "
-                            "keeping the same change key. Never auto-resolve business logic."},
-            {"option": "include_conflicting_changes", "changes": sorted(set(pending) | set(causes)),
-             "description": "Release together with the change(s) that touch the same lines."},
+            {
+                "option": "backport_commit",
+                "description": "Have the change author create a backport commit of the requested "
+                "change on the release base, resolving the conflict manually and "
+                "keeping the same change key. Never auto-resolve business logic.",
+            },
+            {
+                "option": "include_conflicting_changes",
+                "changes": sorted(set(pending) | set(causes)),
+                "description": "Release together with the change(s) that touch the same lines.",
+            },
         ]
     if any(f.kind.value == "AMBIGUOUS_COMMIT" for f in analysis.blockers):
-        options.append({"option": "clarify_commit_mapping",
-                        "description": "Split the multi-ticket commit or confirm its owner, "
-                                       "then re-plan."})
+        options.append(
+            {
+                "option": "clarify_commit_mapping",
+                "description": "Split the multi-ticket commit or confirm its owner, then re-plan.",
+            }
+        )
     if collision:
-        options.append({"option": "investigate_version_collision",
-                        "description": "A tag or artifact already uses the proposed version. "
-                                       "Check for a concurrent or half-finished release, then "
-                                       "re-plan; versions are never overwritten."})
+        options.append(
+            {
+                "option": "investigate_version_collision",
+                "description": "A tag or artifact already uses the proposed version. "
+                "Check for a concurrent or half-finished release, then "
+                "re-plan; versions are never overwritten.",
+            }
+        )
     return options
