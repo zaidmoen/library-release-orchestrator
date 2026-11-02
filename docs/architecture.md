@@ -121,12 +121,12 @@ flowchart LR
 |---|---|---|
 | Input & Requirement Resolver | `requests.py`, `integrations/jira.py` | Normalise Jira keys, aliases ("Change B"), PR refs and SHAs into change keys. Raise `AmbiguousRequestError` when something is unclear. |
 | Git Analysis Engine | `gitutil/repo.py`, `gitutil/history.py` | Safe `subprocess` wrapper (argv lists, no shell). Lists commits, files, patches, `patch-id`s and tags. Groups commits into `ChangeUnit`s. |
-| Dependency Analysis Engine | `analysis/` | Shared files, hunk overlap, Python symbol and module dependencies, a real cherry-pick probe in a sandbox clone, and a change graph with cycle detection. |
+| Dependency Analysis Engine | `analysis/` | Shared files, Python symbol and module dependencies, a real cherry-pick probe in a sandbox clone, and a change graph with cycle detection. |
 | Release Planning Engine | `planning/planner.py` | Builds the `ReleasePlan` and computes prerequisites and remediation options. The plan ID is a content hash. |
 | Version Management Engine | `versioning/` | Strict SemVer 2.0 parsing and precedence, bump policy (conventional commits plus API-removal detection), collision detection against registry and tags, immutable publish. |
 | Change Isolation Engine | `isolation/` | Temporary worktree at a detached base, `cherry-pick -x`, conflict capture, `--abort`. The branch is created **only after full success**, so a failed run leaves no branch behind. |
 | Validation Engine | `validation/runner.py` | Runs allowlisted argv commands from the trusted config against a `git archive` export: the committed content only, with no repository mutation. |
-| Manifest Verifier | `planning/manifest.py` | Schema validation, plus proof that the release branch matches the plan: ancestry, cherry-pick trailers, `patch-id` equality, no extra commits. |
+| Manifest Verifier | `planning/manifest.py` | Schema validation, plus proof that the release branch matches the plan: ancestry, cherry-pick trailers, `patch-id` equal to the patch-id the sandbox probe recorded for the same base, the version commit, and no extra commits. Validation commands in a plan must equal the trusted config. |
 | Caller Discovery & Update | `consumers/` | Finds consumers that pin the library. Uses import analysis and ticket metadata to pick the relevant ones. Rewrites pins on a branch and validates against the published artifact. |
 | PR Orchestration | `integrations/pull_requests.py`, `integrations/github.py` | `PullRequestProvider` protocol. The local provider is fully tested. The GitHub REST adapter creates **draft** PRs and has no merge method. |
 | Audit & Reporting | `reporting/`, `state.py` | JSON and Markdown reports, a run state machine, and a persisted transition history. |
@@ -172,13 +172,13 @@ Run states and transitions are described in
 | Guarantee | Mechanism | Test |
 |---|---|---|
 | No mutation in dry-run or analysis | Probes run in a throwaway `git clone`. Validation runs on `git archive` output. | `test_dry_run_is_non_mutating` |
-| Requested change released without excluded ones | Verifier checks every release commit's `patch-id` against the plan | `test_scenario_independent_*`, `test_verify_detects_*` |
-| Dependent change never reported as independent | Symbol and module analysis marks it `DEPENDENT`, which blocks the plan | `test_scenario_dependent_*` |
-| Conflicts leave repository unchanged | Detached worktree, `cherry-pick --abort`, worktree removed, no branch created | `test_scenario_conflict_*` |
-| Published versions immutable | `O_EXCL` create plus digest comparison | `test_registry_*` |
-| Validation failures block readiness | Non-zero exit or timeout gives `FAILED`; a step that wasn't run is never `PASSED` | `test_scenario_failed_validation_*` |
+| Requested change released without excluded ones | Verifier checks every release commit's `patch-id` against the plan | `test_scenario_a_independent_out_of_order`, `test_verify_detects_extra_commit` |
+| Dependent change never reported as independent | Symbol and module analysis marks it `DEPENDENT`, which blocks the plan | `test_scenario_b_dependent_blocked` |
+| Conflicts leave repository unchanged | Detached worktree, `cherry-pick --abort`, worktree removed, no branch created | `test_scenario_c_conflict_*` |
+| Published versions immutable | `O_EXCL` create plus digest comparison | `test_registry_refuses_overwrite`, `test_concurrent_publish_single_winner` |
+| Validation failures block readiness | Non-zero exit or timeout gives `FAILED`; a step that wasn't run is never `PASSED` | `test_scenario_f_failed_validation` |
 | Consumer PR only after artifact exists | `update-consumers` refuses with `BLOCKED` when the version is missing from the registry | `test_consumer_update_requires_published_version` |
-| Writes require approval | Write commands exit with code 4 without `--approve` | `test_cli_requires_approval` |
+| Writes require approval | Write commands exit with code 4 without `--approve` | `test_write_commands_require_approval` |
 | No merge or force-push | No code path issues `merge`, `push --force` or a PR merge API call | code review + `test_git_wrapper_rejects_forbidden_commands` |
 
 ## 7. Failure handling and recovery
