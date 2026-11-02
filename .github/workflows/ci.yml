@@ -17,8 +17,8 @@ jobs:
         with:
           python-version: "3.12"
       - run: pip install -e ".[dev]"
-      - run: ruff check src tests .claude
-      - run: ruff format --check src tests .claude
+      - run: ruff check src tests .claude examples
+      - run: ruff format --check src tests .claude examples
       - run: mypy --strict src/release_orchestrator
 
   test:
