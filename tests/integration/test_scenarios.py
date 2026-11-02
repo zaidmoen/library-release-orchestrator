@@ -326,3 +326,19 @@ def test_plan_file_roundtrip_and_tamper_detection(demo_factory, tmp_path):
 
     with pytest.raises(ManifestError):
         load_plan(path, demo.config)
+
+
+def test_collision_with_tag_blocks(demo_factory):
+    """A concurrent release tags v1.1.0 elsewhere after we planned: publish must refuse."""
+    demo = demo_factory("independent")
+    plan, _ = demo.plan("FIN-204")
+    demo.orch.prepare(plan, approve=True, dry_run=False)
+    demo.orch.validate(plan)
+    demo.git("ZaidLibrary", "tag", "v1.1.0", "main")  # someone else's 1.1.0
+    with pytest.raises(BlockedError) as exc:
+        demo.orch.publish(plan, approve=True)
+    assert exc.value.reason == "VERSION_COLLISION"
+    assert demo.orch.s.registry.list_versions("zaidlibrary") == []
+    # Re-planning sees the new tag and moves on to the next free version.
+    replanned, _ = demo.plan("FIN-204", base="v1.0.0")
+    assert replanned.proposed_version == "1.2.0"
