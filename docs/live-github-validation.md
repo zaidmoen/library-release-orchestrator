@@ -90,19 +90,37 @@ the release base. With the user's approval, `refs/heads/release-base/v1.0.0` was
 | Unsubmitted PR request couldn't be corrected | request file was write-once | corrected while no PR number is recorded; recorded PRs never retargeted | `test_unsubmitted_external_pr_request_can_be_corrected` |
 | GitHub MCP connector couldn't create repos (403) or read the lab repos (404) | Claude GitHub app has no permission to create repos or access these private repos | Repos created by a human; PRs via prefilled compare links (human-submitted), verified through `refs/pull/*` | n/a (environment) |
 
-## 7. Pull requests
+## 7. Pull requests: **BLOCKED (human GitHub step)**
 
-**Pending.** At the time of writing no PR exists on any lab repository
-(`git ls-remote` shows no `refs/pull/*`). The library PR (`release/1.1.0` →
-`release-base/v1.0.0`) and the payment-service PR (`deps/zaidlibrary-1.1.0` → `main`)
-are prepared as request files and will be recorded here only after they are observed on
-GitHub.
+No PR exists on any lab repository. Evidence, checked repeatedly up to 2026-11-08T16:37Z:
+
+* `git ls-remote <lab repo> 'refs/pull/*'` returns nothing for all three repos. As a
+  control, the same command on `zaidmoen/library-release-orchestrator` returns
+  `refs/pull/1/head` (`8fed533dc6…`), so the method does detect PRs.
+* The GitHub MCP connector gets 403 when creating repos and 404 when reading the lab repos,
+  because the Claude GitHub app has no access to them.
+* The repos are private: the anonymous API returns 404. On GitHub Free, **draft PRs aren't
+  available for private repositories**, which most likely explains why the
+  "create draft PR" submissions never produced a PR.
+
+What is ready and verified: both PR requests exist (`.lro-state/pr-requests/`), and both
+head branches and the library base branch are on GitHub:
+
+| PR (to be created) | Head → base | Head SHA | Expected diff |
+|---|---|---|---|
+| library | `release/1.1.0` → `release-base/v1.0.0` | `2c8e859e47` | 3 files (`__init__.py`, `payments.py`, `test_total_with_tax.py`) |
+| payment-service | `deps/zaidlibrary-1.1.0` → `main` | `51efa021da` | `requirements.txt`: `zaidlibrary==1.0.0` → `1.1.0` |
+
+To finish: make the repos public (or use a plan with private draft PRs), create both
+draft PRs from the prefilled compare links, then run
+`release-orchestrator record-pr --plan plan.json --repository <name> --head <branch> --number N --url URL`
+and re-run `pr` / `update-consumers` to confirm the recorded PRs are reused, not duplicated.
 
 ## 8. Safety verification
 
 | Constraint | Evidence |
 |---|---|
-| No merge | No PR merged; the engine has no merge path |
+| No merge | No PR exists and none was merged; the engine has no merge path |
 | No force-push | Every push went through `Git.push_ref` (single ref, no `+`). The ref diffs above show additions only |
 | No branch or tag deletion or move | `ls-remote` before and after: no ref removed or changed |
 | invoice-service untouched | Only `refs/heads/main` at `72fe57e882…`, the same before and after every step |

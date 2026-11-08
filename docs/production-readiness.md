@@ -13,14 +13,16 @@ The integrations and governance needed for production adoption are incomplete.
 | Consumer targeting, breaking-API protection | LOCAL INTEGRATION (S07, S11) |
 | Allowlisted, never-forced push | LOCAL INTEGRATION against local bare remotes (S09, S15) |
 | Environment ledger, promotion and rollback | LOCAL INTEGRATION (S13, S14) |
-| Draft PRs on GitHub via MCP + `record-pr` | See [evidence/live-github.md](evidence/live-github.md). Not verified until that file says so |
+| Release branch, tag, consumer branch, idempotency on real GitHub | VERIFIED LIVE ([live-github-validation.md](live-github-validation.md)) |
+| Draft PRs on GitHub via `record-pr` | BLOCKED: human GitHub step pending |
 | Python GitHub REST adapter | MOCKED |
 | Jira REST, remote package registries | NOT IMPLEMENTED |
 
 ## Blocking gaps before internal adoption
 
-1. **Live integration evidence.** GitHub PR flow end to end on the sandbox, then a
-   read-only pilot on one real library.
+1. **Finish live PR evidence** (blocked on a human GitHub step), then a read-only pilot on
+   one real library. See [engineering-assessment.md](engineering-assessment.md) for the
+   prioritized plan.
 2. **Real registry adapter** (Artifactory, CodeArtifact or private PyPI) with
    create-if-absent semantics. The local JSON registry and ledger have single-machine
    atomicity only.
