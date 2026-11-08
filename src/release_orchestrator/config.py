@@ -57,6 +57,13 @@ class ConsumerConfig:
 
 
 @dataclass(frozen=True)
+class EnvironmentConfig:
+    name: str
+    required_approvals: int = 1
+    allow_prerelease: bool = True
+
+
+@dataclass(frozen=True)
 class Config:
     config_path: Path
     library: LibraryConfig
@@ -70,6 +77,9 @@ class Config:
     consumers: tuple[ConsumerConfig, ...]
     state_dir: Path
     aliases: dict[str, str] = field(default_factory=dict)
+    environments: tuple[EnvironmentConfig, ...] = ()
+    remote_allowlist: tuple[str, ...] = ()
+    remote_name: str = "origin"
 
     def consumer(self, name: str) -> ConsumerConfig:
         for consumer in self.consumers:
@@ -129,7 +139,7 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
     if not isinstance(prs, dict):
         raise ConfigError("pull_requests must be a mapping")
     pr_provider = str(prs.get("provider", "local"))
-    if pr_provider not in {"local", "github"}:
+    if pr_provider not in {"local", "github", "external"}:
         raise ConfigError(f"Unknown pull_requests.provider '{pr_provider}'")
     gh_repos = prs.get("github_repositories") or {}
     if not isinstance(gh_repos, dict):
@@ -166,6 +176,9 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
         consumers=consumers,
         state_dir=_path(raw, "state_dir", base_dir, default=".lro-state"),
         aliases={k.strip().lower(): v for k, v in aliases.items()},
+        environments=_environments(raw.get("environments")),
+        remote_allowlist=_allowlist(raw.get("remote_allowlist")),
+        remote_name=_str(raw, "remote_name", "origin"),
     )
 
 
@@ -259,3 +272,46 @@ def _compile(pattern: str, where: str, *, groups: int) -> None:
         raise ConfigError(f"{where} is not a valid regex: {exc}") from exc
     if compiled.groups != groups:
         raise ConfigError(f"{where} must contain exactly {groups} capture group(s)")
+
+
+def normalize_remote(url: str) -> str:
+    """``https://github.com/o/r.git`` / ``git@github.com:o/r.git`` -> ``github.com/o/r``."""
+    text = url.strip()
+    text = re.sub(r"^[a-z+]+://", "", text)
+    text = re.sub(r"^[^@/]+@", "", text)  # drop userinfo
+    text = text.replace(":", "/", 1) if re.match(r"^[^/]+:[^/]", text) else text
+    text = re.sub(r"\.git$", "", text.rstrip("/"))
+    return text.lower()
+
+
+def _allowlist(raw: Any) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not all(isinstance(x, str) and x for x in raw):
+        raise ConfigError("remote_allowlist must be a list of repository URLs")
+    entries = tuple(normalize_remote(x) for x in raw)
+    for entry in entries:
+        if entry.count("/") != 2:
+            raise ConfigError(f"remote_allowlist entry '{entry}' must be host/owner/repo")
+    return entries
+
+
+def _environments(raw: Any) -> tuple[EnvironmentConfig, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise ConfigError("environments must be an ordered list")
+    envs = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ConfigError("each environment must be a mapping")
+        approvals = item.get("required_approvals", 1)
+        if not isinstance(approvals, int) or not 1 <= approvals <= 10:
+            raise ConfigError("required_approvals must be an integer in [1, 10]")
+        allow = item.get("allow_prerelease", True)
+        if not isinstance(allow, bool):
+            raise ConfigError("allow_prerelease must be a boolean")
+        envs.append(EnvironmentConfig(_name(item, "name"), approvals, allow))
+    if len({e.name for e in envs}) != len(envs):
+        raise ConfigError("environment names must be unique")
+    return tuple(envs)

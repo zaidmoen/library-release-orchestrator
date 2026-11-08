@@ -33,7 +33,7 @@ TRANSITIONS: dict[RunStatus, frozenset[RunStatus]] = {
     S.APPROVAL_REQUIRED: frozenset({S.PREPARING}),
     S.PREPARING: frozenset({S.VALIDATING, S.BLOCKED, S.FAILED}),
     S.VALIDATING: frozenset({S.PR_READY, S.BLOCKED, S.FAILED}),
-    S.PR_READY: frozenset({S.PUBLISHED, S.BLOCKED}),
+    S.PR_READY: frozenset({S.PUBLISHED, S.BLOCKED, S.FAILED}),
     S.PUBLISHED: frozenset({S.COMPLETED, S.BLOCKED}),
     S.COMPLETED: frozenset(),
     S.BLOCKED: frozenset({S.ANALYZING, S.PREPARING, S.VALIDATING}),
