@@ -79,6 +79,11 @@ def build_plan(
         raise BlockedError(
             f"Nothing to release: {', '.join(released)} already present in {scan.base_ref}",
             reason="NOTHING_TO_RELEASE",
+            details={
+                "released_in": scan.base_ref,
+                "released_in_revision": scan.base_sha,
+                "source_commits": {k: scan.already_released.get(k, []) for k in released},
+            },
         )
 
     analyzer = DependencyAnalyzer(git, config.library.package_dir)

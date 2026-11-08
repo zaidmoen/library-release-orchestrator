@@ -19,7 +19,7 @@ from release_orchestrator import __version__
 from release_orchestrator.config import load_config
 from release_orchestrator.demo import SCENARIOS, build_demo
 from release_orchestrator.environments import EnvironmentLedger
-from release_orchestrator.errors import ExitCode, OrchestratorError
+from release_orchestrator.errors import BlockedError, ExitCode, OrchestratorError
 from release_orchestrator.lab import build_lab
 from release_orchestrator.planning.manifest import load_plan
 from release_orchestrator.workflow import Orchestrator, RequestInput, Services, write_plan
@@ -172,7 +172,17 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
                 "history": scan.to_dict(),
                 "analysis": analysis.to_dict(),
             }
-        plan, run_state = orch.plan(request)
+        try:
+            plan, run_state = orch.plan(request)
+        except BlockedError as exc:
+            if exc.reason != "NOTHING_TO_RELEASE":
+                raise
+            # A re-run after a completed release is recognised, not reported as a failure.
+            return ExitCode.OK, {
+                "status": "ALREADY_RELEASED",
+                "message": exc.message,
+                **exc.details,
+            }
         result: dict[str, Any] = {
             "plan_id": plan.plan_id,
             "status": plan.status,
@@ -260,6 +270,8 @@ def _text_summary(command: str, env: dict[str, Any]) -> str:
             lines.append("  Re-run with --approve once a human has reviewed the plan.")
         return "\n".join(lines)
     res = env["result"]
+    if command == "plan" and res.get("status") == "ALREADY_RELEASED":
+        return f"plan: ALREADY_RELEASED: {res['message']} ({res['released_in_revision'][:10]})"
     if command in ("plan",):
         plan = res["plan"]
         lines = [
