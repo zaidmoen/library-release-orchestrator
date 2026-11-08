@@ -18,11 +18,13 @@ from typing import Any
 from release_orchestrator import __version__
 from release_orchestrator.config import load_config
 from release_orchestrator.demo import SCENARIOS, build_demo
+from release_orchestrator.environments import EnvironmentLedger
 from release_orchestrator.errors import ExitCode, OrchestratorError
+from release_orchestrator.lab import build_lab
 from release_orchestrator.planning.manifest import load_plan
 from release_orchestrator.workflow import Orchestrator, RequestInput, Services, write_plan
 
-WRITE_COMMANDS = {"prepare", "pr", "publish", "update-consumers"}
+WRITE_COMMANDS = {"prepare", "pr", "publish", "update-consumers", "push", "promote", "rollback"}
 
 
 class _JsonFormatter(logging.Formatter):
@@ -89,12 +91,38 @@ def build_parser() -> argparse.ArgumentParser:
         ("pr", "prepare the library release PR (never merged)"),
         ("publish", "publish the immutable artifact and tag"),
         ("update-consumers", "prepare dependency-update branches/PRs for targeted consumers"),
+        ("push", "push release/consumer branches and tag to allowlisted remotes (never forced)"),
     ):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--plan", type=Path, required=True)
         p.add_argument("--approve", action="store_true", help="explicit human approval for writes")
         if name in ("prepare", "update-consumers"):
             p.add_argument("--dry-run", action="store_true", help="simulate without any mutation")
+
+    record = sub.add_parser("record-pr", help="record a PR created externally (GitHub MCP)")
+    record.add_argument("--plan", type=Path, required=True)
+    record.add_argument("--repository", required=True, help="library or consumer name")
+    record.add_argument("--head", required=True, help="head branch of the PR")
+    record.add_argument("--number", type=int, required=True)
+    record.add_argument("--url", required=True)
+    record.add_argument("--state", default="open-draft")
+
+    sub.add_parser("env-status", help="current version per environment")
+    for name, help_text in (
+        ("promote", "promote a published version into an environment"),
+        ("rollback-plan", "plan a roll-forward to the previous artifact (read-only)"),
+        ("rollback", "execute a rollback plan (appends a ledger record)"),
+    ):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("--env", required=True)
+        if name == "promote":
+            p.add_argument("--version", required=True)
+        if name != "rollback-plan":
+            p.add_argument("--approved-by", action="append", default=[])
+            p.add_argument("--approve", action="store_true")
+
+    lab = sub.add_parser("lab-init", help="create the release lab (library + 2 consumers)")
+    lab.add_argument("--dest", type=Path, required=True)
 
     demo = sub.add_parser("demo-init", help="create the fictional demo environment")
     demo.add_argument("--dest", type=Path, required=True)
@@ -107,8 +135,25 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         config_path = build_demo(args.dest, args.scenario)
         return ExitCode.OK, {"config": str(config_path), "scenario": args.scenario}
 
+    if args.command == "lab-init":
+        return ExitCode.OK, {"config": str(build_lab(args.dest))}
+
     config = load_config(args.config)
     orch = Orchestrator(Services.from_config(config))
+
+    if args.command in ("env-status", "promote", "rollback-plan", "rollback"):
+        ledger = EnvironmentLedger(config, orch.s.registry)
+        if args.command == "env-status":
+            return ExitCode.OK, ledger.status()
+        if args.command == "rollback-plan":
+            return ExitCode.OK, ledger.rollback_plan(args.env)
+        if args.command == "promote":
+            return ExitCode.OK, ledger.promote(
+                args.version, args.env, approved_by=args.approved_by, approve=args.approve
+            )
+        return ExitCode.OK, ledger.rollback(
+            args.env, approved_by=args.approved_by, approve=args.approve
+        )
 
     if args.command in ("analyze", "plan"):
         request = RequestInput(
@@ -157,6 +202,17 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         return ExitCode.OK, orch.publish(plan, approve=args.approve)
     if args.command == "update-consumers":
         return ExitCode.OK, orch.update_consumers(plan, approve=args.approve, dry_run=args.dry_run)
+    if args.command == "push":
+        return ExitCode.OK, orch.push(plan, approve=args.approve)
+    if args.command == "record-pr":
+        return ExitCode.OK, orch.record_pr(
+            plan,
+            repository=args.repository,
+            head=args.head,
+            number=args.number,
+            url=args.url,
+            state=args.state,
+        )
     raise AssertionError(args.command)
 
 
