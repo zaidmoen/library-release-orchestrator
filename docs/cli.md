@@ -11,7 +11,7 @@ release-orchestrator [--config FILE] [--json] [-v] [--log-json] <command> [optio
 
 | Command | Writes | Options | Purpose |
 |---|---|---|---|
-| `analyze` | nothing | one of `--ticket K` (repeatable), `--request TEXT`, `--commit SHA` (repeatable); `--base REF`, `--source REF` | Dependency analysis only. Exit 3 if there are blocking findings. |
+| `analyze` | nothing | one of `--ticket K` (repeatable), `--request TEXT`, `--commit SHA` (repeatable); `--base REF`, `--source REF` (may be an RC tag), `--prerelease rc` | Dependency analysis only. Exit 3 if there are blocking findings. |
 | `plan` | run state; `--out` file plus `.md` | same as `analyze`, plus `--out FILE` | Deterministic release plan (manifest). Exit 3 if `BLOCKED`. |
 | `validate-manifest` | nothing | `--plan FILE` | Schema check, `plan_id` integrity, and comparison with the trusted config. |
 | `prepare` | release branch | `--plan FILE`, `--approve`, `--dry-run` | Build the isolated release branch. `--dry-run` works in a throwaway clone. |
@@ -21,6 +21,13 @@ release-orchestrator [--config FILE] [--json] [-v] [--log-json] <command> [optio
 | `publish` | registry artifact plus tag | `--plan FILE`, `--approve` | Immutable publish. In production this belongs in CI after merge. |
 | `update-consumers` | consumer branches plus PRs | `--plan FILE`, `--approve`, `--dry-run` | Targeted dependency bumps, validated against the published artifact. |
 | `status` | nothing | `--plan FILE` | Run state and history. |
+| `push` | remote refs | `--plan FILE`, `--approve` | Push the release branch, the tag (once published) and prepared consumer branches to `remote_allowlist` remotes. One ref per push, never forced, never overwrites a tag |
+| `record-pr` | PR record | `--plan`, `--repository`, `--head`, `--number`, `--url`, `--state` | Record a draft PR created externally (GitHub MCP) for provider `external` |
+| `env-status` | nothing | | Current version and policy per environment |
+| `promote` | environment ledger | `--version`, `--env`, `--approved-by` (repeatable), `--approve` | Ordered promotion of a published artifact (ADR-0007) |
+| `rollback-plan` | nothing | `--env` | Previous artifact for that environment, digest verified |
+| `rollback` | environment ledger | `--env`, `--approved-by`, `--approve` | Roll forward to the previous artifact (appends a record) |
+| `lab-init` | creates `--dest` | `--dest DIR` | Release lab: library with seven tickets, RC tags, two consumers |
 | `demo-init` | creates `--dest` | `--dest DIR`, `--scenario independent\|dependent\|conflict\|failing` | Fictional demo environment. |
 
 ## Exit codes

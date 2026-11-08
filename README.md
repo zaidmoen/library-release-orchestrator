@@ -102,6 +102,25 @@ The latest generated output is in [examples/demo/RESULTS.md](examples/demo/RESUL
 | E: duplicate run | `independent` | identical plan, `already_prepared`, `already_published`, no duplicates |
 | F: failing tests | `failing` | static analysis only warns; validation fails; PR and publish refused |
 
+## Release lab (S01–S15)
+
+A realistic synthetic trunk with seven pending tickets (independent, code-dependent,
+conflicting, behaviourally dependent and breaking changes), cumulative RC tags and two
+consumer services. See [docs/release-lab.md](docs/release-lab.md) and
+[docs/lab-setup.md](docs/lab-setup.md).
+
+```bash
+release-orchestrator lab-init --dest ./.lab
+python examples/lab/run_lab.py        # S01–S15 through the CLI -> examples/lab/RESULTS.md
+```
+
+New in this version: release candidates (`--prerelease rc`, `--source <rc-tag>`), an
+environment ledger (`promote`, `env-status`, `rollback-plan`, `rollback`; ADR-0007),
+approved never-forced `push` to allowlisted remotes, and draft PRs created through the
+GitHub MCP server and recorded with `record-pr` (ADR-0008).
+Assessment: [docs/production-readiness.md](docs/production-readiness.md) ·
+audit: [docs/audit.md](docs/audit.md).
+
 ## Claude Code Skill
 
 The Skill lives in [.claude/skills/library-release/](.claude/skills/library-release/SKILL.md).
@@ -172,7 +191,11 @@ CI runs these on Linux and Windows with Python 3.11 and 3.12
 | Allowlisted validation (library and consumers) | Implemented and tested |
 | Consumer discovery and pin updates (`requirements.txt` `==` pins) | Implemented and tested |
 | Local PR provider | Implemented and tested |
-| GitHub PR provider (draft only, no merge) | Implemented and unit-tested with a fake transport; **not verified against live GitHub** |
+| GitHub PR provider (draft only, no merge) | **MOCKED**: fake transport only (no token available) |
+| Draft PRs via GitHub MCP + `record-pr` (provider `external`) | Implemented; live status in [docs/evidence/live-github.md](docs/evidence/live-github.md) |
+| Allowlisted, never-forced push | LOCAL INTEGRATION (real pushes to local bare remotes) |
+| Release candidates and cumulative-RC subsets | LOCAL INTEGRATION (S06) |
+| Environment ledger: promotion, quorum, rollback | LOCAL INTEGRATION (S13, S14) |
 | Jira REST provider | **Planned** (offline YAML fixture adapter only) |
 | Remote registries (Artifactory, CodeArtifact, PyPI) | **Planned** |
 | Non-Python language adapters | **Planned** (non-Python files are reported as unverified) |

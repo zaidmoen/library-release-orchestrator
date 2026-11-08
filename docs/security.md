@@ -25,6 +25,13 @@
 * **Credentials:** read only from environment variables (`GITHUB_TOKEN`). Never
   written to plans, reports, logs or exceptions. The GitHub adapter redacts the
   `Authorization` header in its error messages.
+* **Remote writes:** only `Git.push_ref`, called from the approved `push` step, may push.
+  It sends one `refs/heads/*` or `refs/tags/*` ref, refuses `+`/`:` refspecs and
+  force/delete/mirror flags, and only targets remotes whose normalised URL is in the
+  config's `remote_allowlist`. A remote tag at another commit is never overwritten
+  (ADR-0008, S15 tests).
+* **Environment changes** need `--approve` plus a quorum of distinct approver names. These
+  names are self-declared in this version, a known gap.
 * **No destructive Git operations:** no force-push, no merge, no branch deletion,
   no `reset --hard`, no `stash`. Cleanup removes only temporary directories created
   by the current process.
