@@ -277,6 +277,9 @@ def _compile(pattern: str, where: str, *, groups: int) -> None:
 def normalize_remote(url: str) -> str:
     """``https://github.com/o/r.git`` / ``git@github.com:o/r.git`` -> ``github.com/o/r``."""
     text = url.strip()
+    if text.lower().startswith("file://"):
+        # Local bare repositories (used by the automated push tests).
+        return "file://" + re.sub(r"\.git$", "", text[7:].rstrip("/")).lower()
     text = re.sub(r"^[a-z+]+://", "", text)
     text = re.sub(r"^[^@/]+@", "", text)  # drop userinfo
     text = text.replace(":", "/", 1) if re.match(r"^[^/]+:[^/]", text) else text
@@ -291,7 +294,7 @@ def _allowlist(raw: Any) -> tuple[str, ...]:
         raise ConfigError("remote_allowlist must be a list of repository URLs")
     entries = tuple(normalize_remote(x) for x in raw)
     for entry in entries:
-        if entry.count("/") != 2:
+        if not entry.startswith("file://") and entry.count("/") != 2:
             raise ConfigError(f"remote_allowlist entry '{entry}' must be host/owner/repo")
     return entries
 
