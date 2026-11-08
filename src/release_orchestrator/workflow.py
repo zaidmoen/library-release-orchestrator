@@ -318,7 +318,7 @@ class Orchestrator:
         spec = PullRequestSpec(
             repository=self.config.library.name,
             head=plan.branch,
-            base=self.config.library.source_ref,
+            base=self._pr_base(run, plan),
             title=(
                 f"Release {plan.library} {plan.proposed_version} ({', '.join(plan.included_keys)})"
             ),
@@ -503,6 +503,9 @@ class Orchestrator:
         allow = self.config.remote_allowlist
         remote = self.config.remote_name
         pushed = [self.s.git.push_ref(remote, f"refs/heads/{plan.branch}", allowlist=allow)]
+        integration = integration_branch(self.config, plan)
+        if integration and self.s.git.branch_exists(integration):
+            pushed.append(self.s.git.push_ref(remote, f"refs/heads/{integration}", allowlist=allow))
         tag = f"{self.config.library.tag_prefix}{plan.proposed_version}"
         if "publish" in run.steps and self.s.git.try_rev_parse(f"refs/tags/{tag}"):
             pushed.append(self.s.git.push_ref(remote, f"refs/tags/{tag}", allowlist=allow))
@@ -537,6 +540,31 @@ class Orchestrator:
         return recorded
 
     # ------------------------------------------------------------------ helpers
+    def _pr_base(self, run: RunState, plan: ReleasePlan) -> str:
+        """Base branch of the library release PR (ADR-0009).
+
+        ``integration``: a branch pinned at the release base, created here if missing, so
+        the PR shows exactly the release delta and merging it never touches the trunk.
+        """
+        branch = integration_branch(self.config, plan)
+        if branch is None:
+            return self.config.library.source_ref
+        existing = self.s.git.try_rev_parse(f"refs/heads/{branch}")
+        if existing is None:
+            self.s.git.create_branch(branch, plan.base_revision)
+        elif existing != plan.base_revision:
+            self._block(
+                run,
+                plan,
+                BlockedError(
+                    f"Integration branch '{branch}' exists at {existing[:10]}, not at the release "
+                    f"base {plan.base_revision[:10]}; it was not moved",
+                    reason="INTEGRATION_BRANCH_MISMATCH",
+                    details={"branch": branch, "sha": existing, "expected": plan.base_revision},
+                ),
+            )
+        return branch
+
     def _validated(self, run: RunState) -> bool:
         if run.state in VALIDATED_STATES:
             return True
@@ -601,3 +629,10 @@ def write_plan(plan: ReleasePlan, out: Path) -> tuple[Path, Path]:
     md = out.with_suffix(".md")
     md.write_text(render_plan(plan), encoding="utf-8")
     return out, md
+
+
+def integration_branch(config: Config, plan: ReleasePlan) -> str | None:
+    """``release-base/<base_ref>`` when release PRs target an integration branch."""
+    if config.library.release_pr_target != "integration":
+        return None
+    return f"release-base/{plan.base_ref}"

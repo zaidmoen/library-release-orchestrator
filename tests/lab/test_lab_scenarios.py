@@ -444,3 +444,71 @@ def _bare_remote(tmp_path: Path, lab: Lab, repo_dir: str) -> Path:
     lab.config_path.write_text(config)
     lab.reload()
     return bare
+
+
+# ----------------------------------------------------------------------------- live-run regressions
+def test_release_pr_targets_integration_branch_at_release_base(lab, tmp_path):
+    """ADR-0009: the release PR must show exactly the release, never target the trunk."""
+    plan = lab.plan("FIN-204")
+    lab.orch.prepare(plan, approve=True, dry_run=False)
+    lab.orch.validate(plan)
+    pr = lab.orch.open_pr(plan, approve=True)
+    assert pr["base"] == "release-base/v1.0.0"
+    assert lab.git(LIBRARY_DIR, "rev-parse", "release-base/v1.0.0") == plan.base_revision
+    assert lab.git(LIBRARY_DIR, "rev-parse", "main") != plan.base_revision  # trunk untouched
+    bare = _bare_remote(tmp_path, lab, LIBRARY_DIR)
+    refs = {p["ref"] for p in lab.orch.push(plan, approve=True)["pushed"]}
+    assert "refs/heads/release-base/v1.0.0" in refs
+    remote = subprocess.run(
+        ["git", "-C", str(bare), "rev-parse", "release-base/v1.0.0"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip()
+    assert remote == plan.base_revision
+
+
+def test_existing_integration_branch_elsewhere_is_never_moved(lab):
+    plan = lab.plan("FIN-204")
+    lab.orch.prepare(plan, approve=True, dry_run=False)
+    lab.orch.validate(plan)
+    lab.git(LIBRARY_DIR, "branch", "release-base/v1.0.0", "main")
+    with pytest.raises(BlockedError) as exc:
+        lab.orch.open_pr(plan, approve=True)
+    assert exc.value.reason == "INTEGRATION_BRANCH_MISMATCH"
+    assert lab.git(LIBRARY_DIR, "rev-parse", "release-base/v1.0.0") == lab.git(
+        LIBRARY_DIR, "rev-parse", "main"
+    )
+
+
+def test_replan_after_release_is_recognised_not_blocked(lab, capsys):
+    from release_orchestrator.cli import main
+
+    plan = lab.plan("FIN-204")
+    lab.release(plan)
+    code = main(["--json", "--config", str(lab.config_path), "plan", "--ticket", "FIN-204"])
+    out = json.loads(capsys.readouterr().out)
+    assert code == 0 and out["result"]["status"] == "ALREADY_RELEASED"
+    assert out["result"]["released_in"] == "v1.1.0"
+    assert out["result"]["source_commits"]["FIN-204"] == plan.included_shas
+
+
+def test_unsubmitted_external_pr_request_can_be_corrected(tmp_path):
+    from release_orchestrator.integrations.pull_requests import (
+        ExternalPullRequestProvider,
+        PullRequestSpec,
+    )
+
+    provider = ExternalPullRequestProvider(tmp_path)
+    provider.ensure(PullRequestSpec("lib", "release/1.1.0", "main", "t", "b"))
+    ref = provider.ensure(PullRequestSpec("lib", "release/1.1.0", "release-base/v1.0.0", "t", "b"))
+    assert ref.base == "release-base/v1.0.0"
+    provider.record(
+        "lib",
+        "release/1.1.0",
+        number=4,
+        url="https://github.com/zaidmoen/harri-release-lab-library/pull/4",
+        state="open-draft",
+    )
+    later = provider.ensure(PullRequestSpec("lib", "release/1.1.0", "main", "t", "b"))
+    assert later.base == "release-base/v1.0.0"  # a created PR is never silently retargeted

@@ -129,6 +129,14 @@ class ExternalPullRequestProvider:
         path = self._path(spec.repository, spec.head)
         if path.is_file():
             data = json.loads(path.read_text(encoding="utf-8"))
+            if data.get("number") is None and (data["base"], data["title"], data["body"]) != (
+                spec.base,
+                spec.title,
+                spec.body,
+            ):
+                # Not created yet, so the request can still be corrected (e.g. new base).
+                data |= {"base": spec.base, "title": spec.title, "body": spec.body}
+                path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             data = {

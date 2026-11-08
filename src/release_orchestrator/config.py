@@ -44,6 +44,9 @@ class LibraryConfig:
     release_branch_prefix: str = "release/"
     version_file: str | None = None
     version_pattern: str = r'__version__\s*=\s*"([^"]+)"'
+    # Where the library release PR points (ADR-0009): "integration" = a branch at the
+    # release base, so the PR diff is exactly the release; "source" = the trunk.
+    release_pr_target: str = "integration"
 
 
 @dataclass(frozen=True)
@@ -120,6 +123,7 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
         release_branch_prefix=_str(lib, "release_branch_prefix", "release/"),
         version_file=_opt_str(lib, "version_file"),
         version_pattern=_str(lib, "version_pattern", LibraryConfig.version_pattern),
+        release_pr_target=_choice(lib, "release_pr_target", ("integration", "source")),
     )
     _compile(library.version_pattern, "library.version_pattern", groups=1)
 
@@ -318,3 +322,10 @@ def _environments(raw: Any) -> tuple[EnvironmentConfig, ...]:
     if len({e.name for e in envs}) != len(envs):
         raise ConfigError("environment names must be unique")
     return tuple(envs)
+
+
+def _choice(raw: dict[str, Any], key: str, choices: tuple[str, ...]) -> str:
+    value = _str(raw, key, choices[0])
+    if value not in choices:
+        raise ConfigError(f"'{key}' must be one of {list(choices)}")
+    return value
