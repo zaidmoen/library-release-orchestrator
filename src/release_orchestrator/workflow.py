@@ -34,6 +34,7 @@ from release_orchestrator.integrations.jira import (
     NullIssueTracker,
 )
 from release_orchestrator.integrations.pull_requests import (
+    ExternalPullRequestProvider,
     LocalPullRequestProvider,
     PullRequestProvider,
     PullRequestSpec,
@@ -104,6 +105,8 @@ class Services:
             prs = GitHubPullRequestProvider(
                 config.github_repositories, api_url=config.github_api_url
             )
+        elif config.pr_provider == "external":
+            prs = ExternalPullRequestProvider(config.state_dir / "pr-requests")
         else:
             prs = LocalPullRequestProvider(config.state_dir / "pull-requests")
         return cls(
@@ -304,7 +307,7 @@ class Orchestrator:
 
     def open_pr(self, plan: ReleasePlan, *, approve: bool) -> dict[str, Any]:
         run = self._run(plan)
-        if run.state not in VALIDATED_STATES:
+        if not self._validated(run):
             raise BlockedError(
                 "Validation has not passed; refusing to prepare a PR",
                 reason="NOT_VALIDATED",
@@ -328,7 +331,7 @@ class Orchestrator:
 
     def publish(self, plan: ReleasePlan, *, approve: bool) -> dict[str, Any]:
         run = self._run(plan)
-        if run.state not in VALIDATED_STATES:
+        if not self._validated(run):
             raise BlockedError(
                 "Only validated releases can be published",
                 reason="NOT_VALIDATED",
@@ -374,13 +377,15 @@ class Orchestrator:
         except ImmutableVersionError as exc:
             self._block(run, plan, exc)
         if tagged is None:
-            self.s.git.run("tag", tag, head)
+            # The artifact is already stored; if tagging fails the run is FAILED and a
+            # re-run finds the artifact (same digest) and only creates the missing tag.
+            self._guarded(run, plan, partial(self.s.git.run, "tag", tag, head))
         result = {
             "status": "published" if created else "already_published",
             "artifact": artifact.to_dict(),
             "tag": tag,
         }
-        if run.state is RunStatus.PR_READY:
+        if run.state in (RunStatus.PR_READY, RunStatus.FAILED):
             run.transition(RunStatus.PUBLISHED, f"{plan.library} {version} published")
         run.record("publish", result)
         self._save(plan, run)
@@ -463,7 +468,81 @@ class Orchestrator:
         self._save(plan, run)
         return summary
 
+    def push(self, plan: ReleasePlan, *, approve: bool) -> dict[str, Any]:
+        """Push the release branch (+ tag once published) and prepared consumer branches.
+
+        Only to remotes in ``remote_allowlist``; one ref per push; never forced.
+        """
+        run = self._run(plan)
+        if not self._validated(run):
+            raise BlockedError(
+                "Only verified and validated releases can be pushed",
+                reason="NOT_VALIDATED",
+                details={"state": str(run.state)},
+            )
+        if not self.config.remote_allowlist:
+            raise BlockedError(
+                "remote_allowlist is empty; nothing may be pushed", reason="NO_REMOTE_ALLOWLIST"
+            )
+        report = verify_release_branch(self.s.git, plan)
+        if not report.ok:
+            self._block(
+                run,
+                plan,
+                BlockedError(
+                    "Release branch does not match the plan",
+                    reason="MANIFEST_MISMATCH",
+                    details=report.to_dict(),
+                ),
+            )
+        if not approve:
+            raise ApprovalRequiredError(
+                "'push' writes to remote repositories and needs --approve",
+                details={"step": "push", "plan_id": plan.plan_id},
+            )
+        allow = self.config.remote_allowlist
+        remote = self.config.remote_name
+        pushed = [self.s.git.push_ref(remote, f"refs/heads/{plan.branch}", allowlist=allow)]
+        tag = f"{self.config.library.tag_prefix}{plan.proposed_version}"
+        if "publish" in run.steps and self.s.git.try_rev_parse(f"refs/tags/{tag}"):
+            pushed.append(self.s.git.push_ref(remote, f"refs/tags/{tag}", allowlist=allow))
+        consumers = run.steps.get("update-consumers", {}).get("result", {}).get("updated", [])
+        for update in consumers:
+            if update["status"] in ("prepared", "already_prepared"):
+                git = Git(self.config.consumer(update["consumer"]).repo)
+                pushed.append(
+                    {
+                        "consumer": update["consumer"],
+                        **git.push_ref(remote, f"refs/heads/{update['branch']}", allowlist=allow),
+                    }
+                )
+        run.record("push", pushed)
+        self._save(plan, run)
+        return {"pushed": pushed}
+
+    def record_pr(
+        self, plan: ReleasePlan, *, repository: str, head: str, number: int, url: str, state: str
+    ) -> dict[str, Any]:
+        if not isinstance(self.s.prs, ExternalPullRequestProvider):
+            raise InvalidInputError("record-pr is only used with pull_requests.provider: external")
+        run = self._run(plan)
+        try:
+            recorded = self.s.prs.record(repository, head, number=number, url=url, state=state)
+        except (FileNotFoundError, ValueError) as exc:
+            raise InvalidInputError(str(exc)) from exc
+        prs = dict(run.steps.get("recorded-prs", {}).get("result", {}))
+        prs[f"{repository}:{head}"] = {"number": number, "url": url, "state": state}
+        run.record("recorded-prs", prs)
+        self._save(plan, run)
+        return recorded
+
     # ------------------------------------------------------------------ helpers
+    def _validated(self, run: RunState) -> bool:
+        if run.state in VALIDATED_STATES:
+            return True
+        last = run.steps.get("validate", {}).get("result", {})
+        return run.state is RunStatus.FAILED and last.get("status") == "PASSED"
+
     def _run(self, plan: ReleasePlan) -> RunState:
         run = self.s.runs.load(plan.plan_id)
         if run is None:
