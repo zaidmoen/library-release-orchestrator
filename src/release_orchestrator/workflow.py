@@ -77,6 +77,7 @@ class RequestInput:
     commits: tuple[str, ...] = ()
     base: str | None = None
     source: str | None = None
+    prerelease: str | None = None
 
 
 @dataclass
@@ -183,6 +184,7 @@ class Orchestrator:
             request=resolved,
             tracker=self.s.tracker,
             registry=self.s.registry,
+            prerelease=request.prerelease,
         )
         run, created = self.s.runs.create_or_load(plan.plan_id, plan.library, plan.proposed_version)
         if created:

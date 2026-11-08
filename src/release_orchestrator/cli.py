@@ -66,7 +66,10 @@ def build_parser() -> argparse.ArgumentParser:
         group.add_argument("--request", help="natural-language request")
         group.add_argument("--commit", action="append", default=[], help="commit SHA (repeatable)")
         p.add_argument("--base", help="release base (default: config base_ref or latest tag)")
-        p.add_argument("--source", help="source branch (default: config source_ref)")
+        p.add_argument("--source", help="source ref (default: config source_ref); may be an RC tag")
+        p.add_argument(
+            "--prerelease", choices=["rc"], help="plan a release candidate, e.g. 1.2.0-rc.24"
+        )
 
     request_args(sub.add_parser("analyze", help="read-only dependency analysis"))
     plan = sub.add_parser("plan", help="generate a deterministic release plan (no repo writes)")
@@ -109,7 +112,12 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
 
     if args.command in ("analyze", "plan"):
         request = RequestInput(
-            tuple(args.ticket), args.request, tuple(args.commit), args.base, args.source
+            tuple(args.ticket),
+            args.request,
+            tuple(args.commit),
+            args.base,
+            args.source,
+            args.prerelease,
         )
         if args.command == "analyze":
             resolved, scan, analysis = orch.analyze(request)

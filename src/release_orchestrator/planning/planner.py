@@ -63,6 +63,7 @@ def build_plan(
     request: ResolvedRequest,
     tracker: IssueTracker,
     registry: PackageRegistry,
+    prerelease: str | None = None,
 ) -> tuple[ReleasePlan, AnalysisResult]:
     requested = list(request.change_keys)
     pending = [k for k in requested if k in scan.changes]
@@ -122,6 +123,7 @@ def build_plan(
         published=registry.list_versions(config.library.name),
         tagged=tagged_versions(config, git),
         api_removals=analysis.api_removals,
+        prerelease=prerelease,
     )
 
     affected = _affected_modules(units, pending, config.library.package_dir)
