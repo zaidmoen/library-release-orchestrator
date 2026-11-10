@@ -36,12 +36,17 @@ first when the user gave one).
    the first non-zero exit. On a validation failure, show each failed `output_tail`.
 6. **Library PR.** After approval, run `LRO pr --plan … --approve`.
    * With provider `external`, run `LRO push --plan … --approve` to put the branch on the
-     allowlisted remote. Then create the **draft** PR with the GitHub MCP tool
+     allowlisted remote. **Then run `LRO reconcile-prs --plan …`.** Create a PR only if
+     that repository's status is `not_created`. `discovered` or `recorded_verified` means
+     the PR already exists. `ambiguous`, `recorded_missing` and `recorded_head_moved` must
+     be reported to the user, never "fixed" by opening another PR. To create one, use the
+     **draft** PR from the GitHub MCP tool
      `create_pull_request` (use `head`, `base`, `title` and `body` from the request file
      the result points to; `draft: true`). The user submits the form. Then run
      `LRO record-pr --plan … --repository <name> --head <branch> --number N --url URL`.
-   * Never create a PR without a request file, and never twice. Re-running `pr` returns the
-     recorded PR.
+   * Never create a PR without a request file, and never twice. If MCP can't reach the
+     repo (404), give the user the compare link, then confirm with `reconcile-prs`.
+     Never claim a PR exists until `reconcile-prs` reports it.
 7. **Publish** (ask first; in production CI does this after merge):
    `LRO publish --plan … --approve`, then `push` again to send the tag.
 8. **Consumers** (ask first): `LRO update-consumers --plan … --approve`. Only `update`

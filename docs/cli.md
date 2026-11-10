@@ -22,6 +22,7 @@ release-orchestrator [--config FILE] [--json] [-v] [--log-json] <command> [optio
 | `update-consumers` | consumer branches plus PRs | `--plan FILE`, `--approve`, `--dry-run` | Targeted dependency bumps, validated against the published artifact. |
 | `status` | nothing | `--plan FILE` | Run state and history. |
 | `push` | remote refs | `--plan FILE`, `--approve` | Push the release branch, the tag (once published) and prepared consumer branches to `remote_allowlist` remotes. One ref per push, never forced, never overwrites a tag |
+| `reconcile-prs` | local PR records only | `--plan FILE` | Match PR requests with `refs/pull/*/head` on the remote: discover, verify, or flag drift and duplicates (ADR-0010). Exit 3 when anything doesn't match |
 | `record-pr` | PR record | `--plan`, `--repository`, `--head`, `--number`, `--url`, `--state` | Record a draft PR created externally (GitHub MCP) for provider `external` |
 | `env-status` | nothing | | Current version and policy per environment |
 | `promote` | environment ledger | `--version`, `--env`, `--approved-by` (repeatable), `--approve` | Ordered promotion of a published artifact (ADR-0007) |
