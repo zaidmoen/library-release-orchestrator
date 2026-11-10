@@ -135,3 +135,16 @@ and re-run `pr` / `update-consumers` to confirm the recorded PRs are reused, not
 * The GitHub MCP connector can't access private sandbox repos without an app permission
   change. The Python REST adapter is still MOCKED (no token).
 * The `INDEPENDENT_WITH_RISKS` warning for FIN-204 is covered by the library's tests only.
+
+
+## 10. PR reconciliation, live (2026-11-10, ADR-0010)
+
+| Check | Command | Result | Exit |
+|---|---|---|---|
+| Lab PR state | `reconcile-prs --plan plan.json` | `zaidlibrary` `release/1.1.0` (head `2c8e859e47`): **not_created**; `payment-service` `deps/zaidlibrary-1.1.0` (head `51efa021da`): **not_created** | 0 |
+| Read-only | `git ls-remote` before and after on all three lab repos | identical | n/a |
+| Positive control (live) | `remote_pull_requests()` on `zaidmoen/library-release-orchestrator` | `{1: 8fed533dc6}` → `https://github.com/zaidmoen/library-release-orchestrator/pull/1`, matching the merged branch tip | n/a |
+| GitHub MCP access to lab repos | `list_branches harri-release-lab-library` | **404** (app has no access; repos stay private by instruction) | n/a |
+
+Lab PR creation remains **BLOCKED** (see §7). Once a PR exists, `reconcile-prs` records it
+automatically, so no manual `record-pr` is needed.
