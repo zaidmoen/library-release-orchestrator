@@ -12,7 +12,10 @@ import logging
 import os
 import subprocess
 import tarfile
+import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from release_orchestrator.errors import ForbiddenOperationError, GitError
 from release_orchestrator.models import CommitInfo, FileChange
@@ -84,11 +87,61 @@ def _guard(args: tuple[str, ...], *, allow_push: bool = False) -> None:
         raise ForbiddenOperationError(f"git {' '.join(args)}: --force is not permitted")
 
 
+T = TypeVar("T")
+
+# Failures worth retrying: the network or the server, never the request itself
+# (a rejected non-fast-forward push, an auth failure or a missing repo is final).
+_TRANSIENT_MARKERS = (
+    "could not resolve host",
+    "connection timed out",
+    "operation timed out",
+    "failed to connect",
+    "connection reset",
+    "rpc failed",
+    "early eof",
+    "remote end hung up",
+    "the requested url returned error: 5",
+    "gnutls",
+    "ssl",
+)
+
+
+def is_transient(error: GitError) -> bool:
+    text = error.message.lower()
+    return any(marker in text for marker in _TRANSIENT_MARKERS)
+
+
+def retry(
+    operation: Callable[[], T],
+    *,
+    attempts: int = 3,
+    base_delay: float = 1.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> T:
+    """Run ``operation``; retry transient Git network errors with exponential backoff."""
+    for attempt in range(1, attempts + 1):
+        try:
+            return operation()
+        except GitError as exc:
+            if attempt == attempts or not is_transient(exc):
+                raise
+            delay = base_delay * 2 ** (attempt - 1)
+            log.warning(
+                "transient git failure, retrying", extra={"attempt": attempt, "delay": delay}
+            )
+            sleep(delay)
+    raise AssertionError("unreachable")
+
+
 class Git:
     """Git operations bound to one repository or worktree directory."""
 
-    def __init__(self, path: Path) -> None:
+    def __init__(
+        self, path: Path, *, network_attempts: int = 3, sleep: Callable[[float], None] = time.sleep
+    ) -> None:
         self.path = Path(path)
+        self.network_attempts = network_attempts
+        self._sleep = sleep
 
     # ------------------------------------------------------------------ plumbing
     def run(
@@ -250,14 +303,22 @@ class Git:
     def remote_url(self, remote: str) -> str:
         return self.out("remote", "get-url", remote)
 
-    def remote_ref(self, remote: str, ref: str) -> str | None:
-        """SHA of ``ref`` on the remote (read-only ``ls-remote``), or None if absent."""
-        out = self.out("ls-remote", remote, ref)
+    def ls_remote(self, remote: str, *patterns: str) -> list[tuple[str, str]]:
+        """``(sha, ref)`` pairs advertised by the remote (read-only; transient errors retried)."""
+        out = retry(
+            lambda: self.out("ls-remote", remote, *patterns),
+            attempts=self.network_attempts,
+            sleep=self._sleep,
+        )
+        pairs = []
         for line in out.splitlines():
             sha, _, name = line.partition(chr(9))  # ls-remote separates with a tab
-            if name == ref:
-                return sha
-        return None
+            pairs.append((sha, name))
+        return pairs
+
+    def remote_ref(self, remote: str, ref: str) -> str | None:
+        """SHA of ``ref`` on the remote, or None if absent."""
+        return next((sha for sha, name in self.ls_remote(remote, ref) if name == ref), None)
 
     def push_ref(self, remote: str, ref: str, *, allowlist: tuple[str, ...]) -> dict[str, str]:
         """Push one ``refs/heads/*`` or ``refs/tags/*`` ref to an allowlisted remote.
@@ -284,7 +345,14 @@ class Git:
                 f"Tag {ref} already exists on the remote at another commit; tags are immutable",
                 details={"remote_sha": existing, "local_sha": local},
             )
-        self.run("push", "--porcelain", remote, f"{ref}:{ref}", allow_push=True)
+
+        def attempt() -> None:
+            # A previous attempt may have landed even though its response was lost.
+            if self.remote_ref(remote, ref) == local:
+                return
+            self.run("push", "--porcelain", remote, f"{ref}:{ref}", allow_push=True)
+
+        retry(attempt, attempts=self.network_attempts, sleep=self._sleep)
         return {"ref": ref, "remote": url, "sha": local, "status": "pushed"}
 
     def create_branch(self, name: str, sha: str) -> None:
