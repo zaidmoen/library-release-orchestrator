@@ -99,6 +99,9 @@ def build_parser() -> argparse.ArgumentParser:
         if name in ("prepare", "update-consumers"):
             p.add_argument("--dry-run", action="store_true", help="simulate without any mutation")
 
+    rec = sub.add_parser("reconcile-prs", help="match PR requests with PRs that exist on GitHub")
+    rec.add_argument("--plan", type=Path, required=True)
+
     record = sub.add_parser("record-pr", help="record a PR created externally (GitHub MCP)")
     record.add_argument("--plan", type=Path, required=True)
     record.add_argument("--repository", required=True, help="library or consumer name")
@@ -214,6 +217,9 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         return ExitCode.OK, orch.update_consumers(plan, approve=args.approve, dry_run=args.dry_run)
     if args.command == "push":
         return ExitCode.OK, orch.push(plan, approve=args.approve)
+    if args.command == "reconcile-prs":
+        summary = orch.reconcile_prs(plan)
+        return (ExitCode.OK if summary["ok"] else ExitCode.BLOCKED), summary
     if args.command == "record-pr":
         return ExitCode.OK, orch.record_pr(
             plan,

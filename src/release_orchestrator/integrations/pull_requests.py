@@ -173,5 +173,21 @@ class ExternalPullRequestProvider:
         path.write_text(json.dumps(data, indent=2), encoding="utf-8")
         return dict(data)
 
+    def get(self, repository: str, head: str) -> dict[str, Any] | None:
+        path = self._path(repository, head)
+        if not path.is_file():
+            return None
+        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        return data
+
+    def record_discovered(self, repository: str, head: str, *, number: int, url: str) -> None:
+        """Record a PR found on the remote by ``pr_reconcile`` (never overwrites another)."""
+        path = self._path(repository, head)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("number") not in (None, number):
+            raise ValueError(f"A different PR (#{data['number']}) is already recorded")
+        data |= {"number": number, "url": url, "state": "exists (discovered via git)"}
+        path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
     def requests(self) -> list[dict[str, Any]]:
         return self._local.list()

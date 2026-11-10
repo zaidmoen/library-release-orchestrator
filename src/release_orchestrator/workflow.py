@@ -33,6 +33,7 @@ from release_orchestrator.integrations.jira import (
     IssueTracker,
     NullIssueTracker,
 )
+from release_orchestrator.integrations.pr_reconcile import reconcile
 from release_orchestrator.integrations.pull_requests import (
     ExternalPullRequestProvider,
     LocalPullRequestProvider,
@@ -538,6 +539,32 @@ class Orchestrator:
         run.record("recorded-prs", prs)
         self._save(plan, run)
         return recorded
+
+    def reconcile_prs(self, plan: ReleasePlan) -> dict[str, Any]:
+        """Compare recorded PR requests with the PRs GitHub actually has (ADR-0010).
+
+        Read-only towards the remote. Locally it records PRs it discovers. Run it before
+        creating any PR externally: a ``discovered`` or ``recorded_verified`` result means
+        the PR already exists and must not be created again.
+        """
+        if not isinstance(self.s.prs, ExternalPullRequestProvider):
+            raise InvalidInputError("reconcile-prs applies to pull_requests.provider: external")
+        run = self._run(plan)
+        remote = self.config.remote_name
+        targets: list[tuple[str, str, Git]] = [(self.config.library.name, plan.branch, self.s.git)]
+        consumers = run.steps.get("update-consumers", {}).get("result", {}).get("updated", [])
+        for update in consumers:
+            if update["status"] in ("prepared", "already_prepared"):
+                repo = Git(self.config.consumer(update["consumer"]).repo)
+                targets.append((update["consumer"], update["branch"], repo))
+        results = [
+            reconcile(self.s.prs, repository=name, head=head, git=git, remote=remote).to_dict()
+            for name, head, git in targets
+        ]
+        summary = {"ok": all(r["ok"] for r in results), "pull_requests": results}
+        run.record("reconcile-prs", summary)
+        self._save(plan, run)
+        return summary
 
     # ------------------------------------------------------------------ helpers
     def _pr_base(self, run: RunState, plan: ReleasePlan) -> str:
