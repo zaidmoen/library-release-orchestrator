@@ -110,8 +110,9 @@ def test_s02_independent_out_of_order_release_excludes_a(lab):
 def test_s03_dependent_release_blocked_with_prerequisite(lab):
     plan = lab.plan("FIN-211")
     assert plan.status == "BLOCKED" and plan.analysis["verdict"] == Verdict.DEPENDENT
-    [blocker] = plan.blockers
-    assert blocker["reason"] == "MISSING_PREREQUISITE" and blocker["depends_on"] == "FIN-198"
+    reasons = {(b["reason"], b["depends_on"]) for b in plan.blockers}
+    # Two independent sources agree: the code (static analysis) and the issue tracker.
+    assert reasons == {("MISSING_PREREQUISITE", "FIN-198"), ("UNRESOLVED_BLOCKER", "FIN-198")}
     assert plan.analysis["probe"]["applied_cleanly"] is True  # Git alone would accept it
     option = next(r for r in plan.remediation if r["option"] == "include_prerequisites")
     assert option["changes"] == ["FIN-198", "FIN-211"]

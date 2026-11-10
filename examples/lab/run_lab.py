@@ -106,7 +106,7 @@ def s03(r: Run) -> list[Check]:
         ("blocked (exit 3)", code == 3),
         (
             "prerequisite FIN-198 reported",
-            [b["depends_on"] for b in plan["blockers"]] == ["FIN-198"],
+            {b["depends_on"] for b in plan["blockers"]} == {"FIN-198"},
         ),
         ("cherry-pick alone would have been clean", plan["analysis"]["probe"]["applied_cleanly"]),
         ("remediation plan is ready", code2 == 0),

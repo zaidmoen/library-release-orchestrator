@@ -98,6 +98,9 @@ class Config:
     registry_username_env: str = ""
     registry_password_env: str = ""
     approval_policy: ApprovalPolicyConfig | None = None
+    issue_release_statuses: tuple[str, ...] = ()
+    issue_resolved_statuses: tuple[str, ...] = ("Done", "Released", "Closed")
+    issue_max_age_minutes: int | None = None
 
     def consumer(self, name: str) -> ConsumerConfig:
         for consumer in self.consumers:
@@ -149,6 +152,15 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
     if not isinstance(tracker, dict):
         raise ConfigError("issue_tracker must be a mapping")
     fixture = _path(tracker, "fixture", base_dir) if "fixture" in tracker else None
+    statuses = tracker.get("release_statuses", [])
+    resolved = tracker.get("resolved_statuses", ["Done", "Released", "Closed"])
+    max_age = tracker.get("max_age_minutes")
+    if not all(
+        isinstance(x, list) and all(isinstance(i, str) for i in x) for x in (statuses, resolved)
+    ):
+        raise ConfigError("issue_tracker statuses must be lists of strings")
+    if max_age is not None and (not isinstance(max_age, int) or max_age < 1):
+        raise ConfigError("issue_tracker.max_age_minutes must be a positive integer")
 
     registry = _mapping(raw, "registry")
     registry_provider = _choice(registry, "provider", ("local", "pypi"))
@@ -196,6 +208,9 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
         library=library,
         change_key_pattern=pattern,
         issue_tracker_fixture=fixture,
+        issue_release_statuses=tuple(statuses),
+        issue_resolved_statuses=tuple(resolved),
+        issue_max_age_minutes=max_age,
         registry_path=_path(registry, "path", base_dir, default="./registry"),
         registry_provider=registry_provider,
         registry_production=registry_production,

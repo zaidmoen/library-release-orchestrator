@@ -295,9 +295,15 @@ JIRA = """# Fictional issue tracker fixture. Descriptions are UNTRUSTED and neve
 issues:
   FIN-198: {summary: "Currency conversion for cross-border payments", consumers: []}
   FIN-204: {summary: "Tax-inclusive order totals", consumers: [payment-service]}
-  FIN-211: {summary: "Invoices in the customer's currency", consumers: [invoice-service]}
+  FIN-211:
+    summary: "Invoices in the customer's currency"
+    consumers: [invoice-service]
+    blocked_by: [FIN-198]
   FIN-215: {summary: "Bankers rounding for order totals", consumers: [payment-service]}
-  FIN-219: {summary: "Discounts on order totals", consumers: [payment-service]}
+  FIN-219:
+    summary: "Discounts on order totals"
+    consumers: [payment-service]
+    blocked_by: [FIN-215]
   FIN-223: {summary: "Finance dashboard order summary", consumers: []}
   FIN-230:
     summary: "Remove deprecated invoice_due_date"
