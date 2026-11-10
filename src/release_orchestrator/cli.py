@@ -20,6 +20,11 @@ from release_orchestrator.config import load_config
 from release_orchestrator.demo import SCENARIOS, build_demo
 from release_orchestrator.environments import EnvironmentLedger
 from release_orchestrator.errors import BlockedError, ExitCode, OrchestratorError
+from release_orchestrator.integrations.github_status import (
+    ApprovalPolicy,
+    GitHubReader,
+    evaluate_approval,
+)
 from release_orchestrator.lab import build_lab
 from release_orchestrator.planning.manifest import load_plan
 from release_orchestrator.workflow import Orchestrator, RequestInput, Services, write_plan
@@ -99,6 +104,16 @@ def build_parser() -> argparse.ArgumentParser:
         if name in ("prepare", "update-consumers"):
             p.add_argument("--dry-run", action="store_true", help="simulate without any mutation")
 
+    st = sub.add_parser("pr-status", help="authoritative PR state and approval decision (GitHub)")
+    st.add_argument("--plan", type=Path, required=True)
+    gh = sub.add_parser("github-pr-status", help="read any PR's state, reviews and checks")
+    gh.add_argument("--repository", required=True, help="owner/name")
+    gh.add_argument("--number", type=int, required=True)
+    gh.add_argument("--expected-head", help="commit the approval must be on (default: PR head)")
+    gh.add_argument("--required-approvals", type=int, default=1)
+    gh.add_argument("--required-check", action="append", default=[])
+    gh.add_argument("--allow-draft", action="store_true")
+
     rec = sub.add_parser("reconcile-prs", help="match PR requests with PRs that exist on GitHub")
     rec.add_argument("--plan", type=Path, required=True)
 
@@ -137,6 +152,17 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     if args.command == "demo-init":
         config_path = build_demo(args.dest, args.scenario)
         return ExitCode.OK, {"config": str(config_path), "scenario": args.scenario}
+
+    if args.command == "github-pr-status":
+        evidence = GitHubReader().evidence(args.repository, args.number)
+        decision = evaluate_approval(
+            evidence,
+            ApprovalPolicy(
+                args.required_approvals, tuple(args.required_check), not args.allow_draft
+            ),
+            expected_head=args.expected_head or evidence.pull.head_sha,
+        )
+        return ExitCode.OK, {"evidence": evidence.to_dict(), "decision": decision.to_dict()}
 
     if args.command == "lab-init":
         return ExitCode.OK, {"config": str(build_lab(args.dest))}
@@ -217,6 +243,10 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         return ExitCode.OK, orch.update_consumers(plan, approve=args.approve, dry_run=args.dry_run)
     if args.command == "push":
         return ExitCode.OK, orch.push(plan, approve=args.approve)
+    if args.command == "pr-status":
+        status = orch.pr_status(plan)
+        approved = status.get("decision", {}).get("approved", True)
+        return (ExitCode.OK if approved else ExitCode.BLOCKED), status
     if args.command == "reconcile-prs":
         summary = orch.reconcile_prs(plan)
         return (ExitCode.OK if summary["ok"] else ExitCode.BLOCKED), summary

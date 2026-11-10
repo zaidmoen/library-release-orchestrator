@@ -60,6 +60,15 @@ class ConsumerConfig:
 
 
 @dataclass(frozen=True)
+class ApprovalPolicyConfig:
+    """Publication requires a PR review approval verified on GitHub (ADR-0011)."""
+
+    required_approvals: int = 1
+    required_checks: tuple[str, ...] = ()
+    require_ready_for_review: bool = True
+
+
+@dataclass(frozen=True)
 class EnvironmentConfig:
     name: str
     required_approvals: int = 1
@@ -83,6 +92,12 @@ class Config:
     environments: tuple[EnvironmentConfig, ...] = ()
     remote_allowlist: tuple[str, ...] = ()
     remote_name: str = "origin"
+    registry_provider: str = "local"
+    registry_production: bool = False
+    registry_url: str = ""
+    registry_username_env: str = ""
+    registry_password_env: str = ""
+    approval_policy: ApprovalPolicyConfig | None = None
 
     def consumer(self, name: str) -> ConsumerConfig:
         for consumer in self.consumers:
@@ -136,8 +151,17 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
     fixture = _path(tracker, "fixture", base_dir) if "fixture" in tracker else None
 
     registry = _mapping(raw, "registry")
-    if registry.get("provider", "local") != "local":
-        raise ConfigError("Only registry.provider 'local' is implemented in this version")
+    registry_provider = _choice(registry, "provider", ("local", "pypi"))
+    registry_production = registry.get("production", False)
+    if not isinstance(registry_production, bool):
+        raise ConfigError("registry.production must be a boolean")
+    if registry_provider == "pypi":
+        for key in ("url", "username_env", "password_env"):
+            _str(registry, key)
+        if not str(registry["url"]).startswith(
+            ("https://", "http://127.0.0.1", "http://localhost")
+        ):
+            raise ConfigError("registry.url must be https (plain http only for a local test index)")
 
     prs = raw.get("pull_requests") or {}
     if not isinstance(prs, dict):
@@ -172,7 +196,13 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
         library=library,
         change_key_pattern=pattern,
         issue_tracker_fixture=fixture,
-        registry_path=_path(registry, "path", base_dir),
+        registry_path=_path(registry, "path", base_dir, default="./registry"),
+        registry_provider=registry_provider,
+        registry_production=registry_production,
+        registry_url=str(registry.get("url", "")),
+        registry_username_env=str(registry.get("username_env", "")),
+        registry_password_env=str(registry.get("password_env", "")),
+        approval_policy=_approval_policy(raw.get("approval_policy")),
         pr_provider=pr_provider,
         github_repositories={str(k): str(v) for k, v in gh_repos.items()},
         github_api_url=str(prs.get("api_url", "https://api.github.com")),
@@ -329,3 +359,20 @@ def _choice(raw: dict[str, Any], key: str, choices: tuple[str, ...]) -> str:
     if value not in choices:
         raise ConfigError(f"'{key}' must be one of {list(choices)}")
     return value
+
+
+def _approval_policy(raw: Any) -> ApprovalPolicyConfig | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ConfigError("approval_policy must be a mapping")
+    approvals = raw.get("required_approvals", 1)
+    if not isinstance(approvals, int) or not 1 <= approvals <= 10:
+        raise ConfigError("approval_policy.required_approvals must be an integer in [1, 10]")
+    checks = raw.get("required_checks", [])
+    if not isinstance(checks, list) or not all(isinstance(c, str) and c for c in checks):
+        raise ConfigError("approval_policy.required_checks must be a list of check names")
+    ready = raw.get("require_ready_for_review", True)
+    if not isinstance(ready, bool):
+        raise ConfigError("approval_policy.require_ready_for_review must be a boolean")
+    return ApprovalPolicyConfig(approvals, tuple(checks), ready)
