@@ -181,6 +181,21 @@ CI runs these on Linux and Windows with Python 3.11 and 3.12
 
 ## Implementation status
 
+The authoritative, evidence-linked matrix is [docs/engineering-assessment.md](docs/engineering-assessment.md). Additions in the latest iteration:
+
+| Area | Status |
+|---|---|
+| PR discovery and reconciliation through `refs/pull/*` (ADR-0010) | **Verified live** (read-only) |
+| Authoritative PR status, reviews, checks; approval policy gating `publish` (ADR-0011) | **Verified live** (read-only, PR #2); gate verified locally |
+| PEP 503 package index with reproducible wheels, never-overwrite, lost-response reconciliation (ADR-0012) | Verified locally against a real pypiserver; no production index |
+| Issue eligibility from timestamped snapshots: status, blockers, cycles, staleness (ADR-0013) | Verified locally; live Jira **blocked** |
+| Run-state optimistic concurrency, structured transition logs | Verified locally |
+| RC → final promotion | **Not implemented** |
+
+Operations: [runbook](docs/operations-runbook.md) · [integrations](docs/integrations.md) · [testing strategy](docs/testing-strategy.md) · [live GitHub validation](docs/live-github-validation.md)
+
+Earlier capabilities:
+
 | Area | Status |
 |---|---|
 | Git analysis, change mapping, multi-commit changes, ambiguity reporting | Implemented and tested |

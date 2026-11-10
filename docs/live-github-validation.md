@@ -148,3 +148,28 @@ and re-run `pr` / `update-consumers` to confirm the recorded PRs are reused, not
 
 Lab PR creation remains **BLOCKED** (see §7). Once a PR exists, `reconcile-prs` records it
 automatically, so no manual `record-pr` is needed.
+
+## 11. Authoritative PR status, live (2026-11-10, ADR-0011)
+
+`release-orchestrator github-pr-status --repository zaidmoen/library-release-orchestrator --number 2 --required-check lint --required-check "test (ubuntu-latest, 3.12)"`
+(anonymous REST, read-only), exit 0:
+
+| Field | Value read from GitHub |
+|---|---|
+| state / draft / merged | `open` / `true` / `false` |
+| head → base | `feat/real-world-release-lab` (`72a7a4617613…`) → `main` |
+| reviews | none |
+| check runs on head | 10 runs (push and pull_request workflows), all `completed/success` |
+| decision | **not approved**: "PR #2 is still a draft", "0 current approval(s), 1 required" |
+
+This is the expected, correct result: the engine refuses to treat a draft PR with no
+review as an approved release. Private lab repos can't be read the same way without a
+token (`GITHUB_ACCESS_DENIED`, 404), and the connector also gets 404. **Blocked.**
+
+## 12. Jira (2026-11-10, ADR-0013)
+
+The Atlassian MCP server is connected with read-write Jira access to the company's real
+site, not a sandbox. The FIN-* lab tickets are fictional and aren't there. No Jira data was
+read into this repository and nothing was written to Jira. Live Jira eligibility is
+**BLOCKED** pending a sandbox project or explicit read-only authorization. The engine side
+is verified locally (`tests/unit/test_issue_eligibility.py`).

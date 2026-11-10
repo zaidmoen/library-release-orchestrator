@@ -62,6 +62,25 @@ first when the user gave one).
     [references/policies.md](references/policies.md)). List what is left for humans:
     review, merge and deploy.
 
+## Intent → command (only these exist)
+
+| User asks | Run | Read from the JSON |
+|---|---|---|
+| "Analyze FIN-204" / "Show the dependency graph" | `LRO analyze --ticket FIN-204` | `analysis.verdict`, `findings`, `dependency_graph` |
+| "Prepare FIN-204 for release" | the Workflow above | — |
+| "Why is FIN-211 blocked?" | `LRO plan --ticket FIN-211` | `blockers[]` (code **and** tracker sources), `remediation[]` |
+| "Next available version?" / "Does this release exist?" | `LRO plan …` | `release.proposed_version`; `status: ALREADY_RELEASED` + `released_in` |
+| "Reconcile release PRs" | `LRO reconcile-prs --plan …` | per-repo `status` |
+| "Show pending approvals" | `LRO pr-status --plan …` (any PR: `LRO github-pr-status --repository o/r --number N`) | `decision.reasons`, `stale_approvals`, `checks` |
+| "Validate the release candidate" | `LRO plan … --prerelease rc` → `prepare` → `validate` | `validate.status` |
+| "Which services need updates?" | `LRO plan …` | `consumers[].action` |
+| "Why did publish fail?" / "Recovery plan" | `LRO status --plan …` | `steps.last_error`; map `reason` with docs/operations-runbook.md |
+| "Show the audit trail" | `LRO status --plan …` and `<state_dir>/reports/<plan_id>.md` | history, provenance, evidence |
+| "Promote the RC to final" | **not supported yet**. Say so; never improvise | — |
+
+Publishing with an `approval_policy` requires `pr-status` → `decision.approved: true`. A
+draft PR, a stale approval or a non-green required check means: report and stop.
+
 ## Hard rules
 
 * Never merge, force-push, delete branches or tags, or deploy. The only push is

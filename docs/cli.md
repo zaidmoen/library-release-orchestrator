@@ -88,3 +88,16 @@ release-orchestrator [--config FILE] [--json] [-v] [--log-json] <command> [optio
 Validation rules are in `planning/manifest.py::validate_manifest`. A manifest is never
 accepted as proof of its own contents: `verify` and `validate` re-derive everything from
 Git, and validation commands always come from the config.
+
+## Commands added in the release-lab iteration
+
+| Command | Writes | Purpose |
+|---|---|---|
+| `pr-status --plan FILE` | run state (evidence) | Read the recorded library PR from GitHub (state, draft, merged, head, reviews, checks) and evaluate `approval_policy`. Exit 3 if not approved |
+| `github-pr-status --repository o/r --number N [--expected-head SHA] [--required-approvals N] [--required-check NAME] [--allow-draft]` | nothing | Same read and evaluation for any PR, no config needed |
+
+New `BLOCKED` reasons: `APPROVAL_NOT_VERIFIED`, `PRODUCTION_PUBLISH_UNAUTHORIZED`,
+`PR_NOT_RECORDED`, `GITHUB_REPO_UNMAPPED`, `ARTIFACT_BUILD_FAILED`,
+`ARTIFACT_VERSION_MISMATCH`, `ISSUE_DATA_STALE`, `ISSUE_INACCESSIBLE`,
+`ISSUE_NOT_RELEASABLE`, `UNRESOLVED_BLOCKER`, `ISSUE_LINK_CYCLE`. New error codes:
+`GITHUB_ACCESS_DENIED`, `REGISTRY_AUTH_FAILED`, `CONCURRENT_MODIFICATION` (exit 6).
