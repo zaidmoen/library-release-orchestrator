@@ -13,7 +13,11 @@ authors = [{ name = "Library Release Orchestrator contributors" }]
 dependencies = ["PyYAML>=6.0"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "types-PyYAML"]
+dev = [
+  "pytest>=8", "ruff>=0.6", "mypy>=1.10", "types-PyYAML",
+  # isolated PEP 503 registry + reproducible wheel builds for integration tests
+  "pypiserver==2.3.2", "passlib>=1.7", "setuptools>=68", "wheel>=0.41",
+]
 
 [project.scripts]
 release-orchestrator = "release_orchestrator.cli:main"

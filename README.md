@@ -102,6 +102,25 @@ The latest generated output is in [examples/demo/RESULTS.md](examples/demo/RESUL
 | E: duplicate run | `independent` | identical plan, `already_prepared`, `already_published`, no duplicates |
 | F: failing tests | `failing` | static analysis only warns; validation fails; PR and publish refused |
 
+## Release lab (S01–S15)
+
+A realistic synthetic trunk with seven pending tickets (independent, code-dependent,
+conflicting, behaviourally dependent and breaking changes), cumulative RC tags and two
+consumer services. See [docs/release-lab.md](docs/release-lab.md) and
+[docs/lab-setup.md](docs/lab-setup.md).
+
+```bash
+release-orchestrator lab-init --dest ./.lab
+python examples/lab/run_lab.py        # S01–S15 through the CLI -> examples/lab/RESULTS.md
+```
+
+New in this version: release candidates (`--prerelease rc`, `--source <rc-tag>`), an
+environment ledger (`promote`, `env-status`, `rollback-plan`, `rollback`; ADR-0007),
+approved never-forced `push` to allowlisted remotes, and draft PRs created through the
+GitHub MCP server and recorded with `record-pr` (ADR-0008).
+Assessment: [docs/production-readiness.md](docs/production-readiness.md) ·
+audit: [docs/audit.md](docs/audit.md).
+
 ## Claude Code Skill
 
 The Skill lives in [.claude/skills/library-release/](.claude/skills/library-release/SKILL.md).
@@ -162,6 +181,22 @@ CI runs these on Linux and Windows with Python 3.11 and 3.12
 
 ## Implementation status
 
+The authoritative, evidence-linked matrix is [docs/engineering-assessment.md](docs/engineering-assessment.md). Additions in the latest iteration:
+
+| Area | Status |
+|---|---|
+| PR discovery and reconciliation through `refs/pull/*` (ADR-0010) | **Verified live** (read-only) |
+| Authoritative PR status, reviews, checks; approval policy gating `publish` (ADR-0011) | **Verified live** (read-only, PR #2); gate verified locally |
+| PEP 503 package index with reproducible wheels, never-overwrite, lost-response reconciliation (ADR-0012) | Verified locally against a real pypiserver; no production index |
+| Issue eligibility from timestamped snapshots: status, blockers, cycles, staleness (ADR-0013) | Verified locally; live Jira **blocked** |
+| Run-state optimistic concurrency, structured transition logs | Verified locally |
+| Security hardening: strict URL/origin validation, explicit registry classification, fail-closed approvals (verified reviewer permission, dismissals, statuses, unreadable protection), production publication refused | Verified locally (`test_config_security.py`, `test_github_status.py`, `test_publish_authorization.py`) |
+| RC → final promotion | **Not implemented** |
+
+Operations: [runbook](docs/operations-runbook.md) · [integrations](docs/integrations.md) · [testing strategy](docs/testing-strategy.md) · [live GitHub validation](docs/live-github-validation.md)
+
+Earlier capabilities:
+
 | Area | Status |
 |---|---|
 | Git analysis, change mapping, multi-commit changes, ambiguity reporting | Implemented and tested |
@@ -172,7 +207,11 @@ CI runs these on Linux and Windows with Python 3.11 and 3.12
 | Allowlisted validation (library and consumers) | Implemented and tested |
 | Consumer discovery and pin updates (`requirements.txt` `==` pins) | Implemented and tested |
 | Local PR provider | Implemented and tested |
-| GitHub PR provider (draft only, no merge) | Implemented and unit-tested with a fake transport; **not verified against live GitHub** |
+| GitHub PR provider (draft only, no merge) | **MOCKED**: fake transport only (no token available) |
+| Draft PRs via GitHub MCP + `record-pr` (provider `external`) | Implemented; live status in [docs/evidence/live-github.md](docs/evidence/live-github.md) |
+| Allowlisted, never-forced push | LOCAL INTEGRATION (real pushes to local bare remotes) |
+| Release candidates and cumulative-RC subsets | LOCAL INTEGRATION (S06) |
+| Environment ledger: promotion, quorum, rollback | LOCAL INTEGRATION (S13, S14) |
 | Jira REST provider | **Planned** (offline YAML fixture adapter only) |
 | Remote registries (Artifactory, CodeArtifact, PyPI) | **Planned** |
 | Non-Python language adapters | **Planned** (non-Python files are reported as unverified) |

@@ -18,18 +18,35 @@ from typing import Any
 from release_orchestrator import __version__
 from release_orchestrator.config import load_config
 from release_orchestrator.demo import SCENARIOS, build_demo
-from release_orchestrator.errors import ExitCode, OrchestratorError
+from release_orchestrator.environments import EnvironmentLedger
+from release_orchestrator.errors import BlockedError, ExitCode, OrchestratorError
+from release_orchestrator.integrations.github_status import (
+    ApprovalPolicy,
+    GitHubReader,
+    evaluate_approval,
+)
+from release_orchestrator.lab import build_lab
 from release_orchestrator.planning.manifest import load_plan
 from release_orchestrator.workflow import Orchestrator, RequestInput, Services, write_plan
 
-WRITE_COMMANDS = {"prepare", "pr", "publish", "update-consumers"}
+WRITE_COMMANDS = {"prepare", "pr", "publish", "update-consumers", "push", "promote", "rollback"}
 
 
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         data = {"level": record.levelname, "logger": record.name, "message": record.getMessage()}
-        if hasattr(record, "argv"):
-            data["argv"] = record.argv
+        for key in (
+            "argv",
+            "plan_id",
+            "from_state",
+            "to_state",
+            "note",
+            "version",
+            "attempt",
+            "delay",
+        ):
+            if hasattr(record, key):
+                data[key] = getattr(record, key)
         return json.dumps(data)
 
 
@@ -66,7 +83,10 @@ def build_parser() -> argparse.ArgumentParser:
         group.add_argument("--request", help="natural-language request")
         group.add_argument("--commit", action="append", default=[], help="commit SHA (repeatable)")
         p.add_argument("--base", help="release base (default: config base_ref or latest tag)")
-        p.add_argument("--source", help="source branch (default: config source_ref)")
+        p.add_argument("--source", help="source ref (default: config source_ref); may be an RC tag")
+        p.add_argument(
+            "--prerelease", choices=["rc"], help="plan a release candidate, e.g. 1.2.0-rc.24"
+        )
 
     request_args(sub.add_parser("analyze", help="read-only dependency analysis"))
     plan = sub.add_parser("plan", help="generate a deterministic release plan (no repo writes)")
@@ -86,12 +106,56 @@ def build_parser() -> argparse.ArgumentParser:
         ("pr", "prepare the library release PR (never merged)"),
         ("publish", "publish the immutable artifact and tag"),
         ("update-consumers", "prepare dependency-update branches/PRs for targeted consumers"),
+        ("push", "push release/consumer branches and tag to allowlisted remotes (never forced)"),
     ):
         p = sub.add_parser(name, help=help_text)
         p.add_argument("--plan", type=Path, required=True)
         p.add_argument("--approve", action="store_true", help="explicit human approval for writes")
         if name in ("prepare", "update-consumers"):
             p.add_argument("--dry-run", action="store_true", help="simulate without any mutation")
+
+    st = sub.add_parser("pr-status", help="authoritative PR state and approval decision (GitHub)")
+    st.add_argument("--plan", type=Path, required=True)
+    gh = sub.add_parser("github-pr-status", help="read any PR's state, reviews and checks")
+    gh.add_argument("--repository", required=True, help="owner/name")
+    gh.add_argument("--number", type=int, required=True)
+    gh.add_argument("--expected-head", help="commit the approval must be on (default: PR head)")
+    gh.add_argument("--required-approvals", type=int, default=1)
+    gh.add_argument("--required-check", action="append", default=[])
+    gh.add_argument("--allow-draft", action="store_true")
+    gh.add_argument(
+        "--min-reviewer-permission",
+        default="write",
+        choices=["read", "triage", "write", "maintain", "admin"],
+    )
+
+    rec = sub.add_parser("reconcile-prs", help="match PR requests with PRs that exist on GitHub")
+    rec.add_argument("--plan", type=Path, required=True)
+
+    record = sub.add_parser("record-pr", help="record a PR created externally (GitHub MCP)")
+    record.add_argument("--plan", type=Path, required=True)
+    record.add_argument("--repository", required=True, help="library or consumer name")
+    record.add_argument("--head", required=True, help="head branch of the PR")
+    record.add_argument("--number", type=int, required=True)
+    record.add_argument("--url", required=True)
+    record.add_argument("--state", default="open-draft")
+
+    sub.add_parser("env-status", help="current version per environment")
+    for name, help_text in (
+        ("promote", "promote a published version into an environment"),
+        ("rollback-plan", "plan a roll-forward to the previous artifact (read-only)"),
+        ("rollback", "execute a rollback plan (appends a ledger record)"),
+    ):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("--env", required=True)
+        if name == "promote":
+            p.add_argument("--version", required=True)
+        if name != "rollback-plan":
+            p.add_argument("--approved-by", action="append", default=[])
+            p.add_argument("--approve", action="store_true")
+
+    lab = sub.add_parser("lab-init", help="create the release lab (library + 2 consumers)")
+    lab.add_argument("--dest", type=Path, required=True)
 
     demo = sub.add_parser("demo-init", help="create the fictional demo environment")
     demo.add_argument("--dest", type=Path, required=True)
@@ -104,12 +168,48 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         config_path = build_demo(args.dest, args.scenario)
         return ExitCode.OK, {"config": str(config_path), "scenario": args.scenario}
 
+    if args.command == "github-pr-status":
+        evidence = GitHubReader().evidence(args.repository, args.number)
+        decision = evaluate_approval(
+            evidence,
+            ApprovalPolicy(
+                args.required_approvals,
+                tuple(args.required_check),
+                not args.allow_draft,
+                args.min_reviewer_permission,
+            ),
+            expected_head=args.expected_head or evidence.pull.head_sha,
+        )
+        return ExitCode.OK, {"evidence": evidence.to_dict(), "decision": decision.to_dict()}
+
+    if args.command == "lab-init":
+        return ExitCode.OK, {"config": str(build_lab(args.dest))}
+
     config = load_config(args.config)
     orch = Orchestrator(Services.from_config(config))
 
+    if args.command in ("env-status", "promote", "rollback-plan", "rollback"):
+        ledger = EnvironmentLedger(config, orch.s.registry)
+        if args.command == "env-status":
+            return ExitCode.OK, ledger.status()
+        if args.command == "rollback-plan":
+            return ExitCode.OK, ledger.rollback_plan(args.env)
+        if args.command == "promote":
+            return ExitCode.OK, ledger.promote(
+                args.version, args.env, approved_by=args.approved_by, approve=args.approve
+            )
+        return ExitCode.OK, ledger.rollback(
+            args.env, approved_by=args.approved_by, approve=args.approve
+        )
+
     if args.command in ("analyze", "plan"):
         request = RequestInput(
-            tuple(args.ticket), args.request, tuple(args.commit), args.base, args.source
+            tuple(args.ticket),
+            args.request,
+            tuple(args.commit),
+            args.base,
+            args.source,
+            args.prerelease,
         )
         if args.command == "analyze":
             resolved, scan, analysis = orch.analyze(request)
@@ -119,7 +219,17 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
                 "history": scan.to_dict(),
                 "analysis": analysis.to_dict(),
             }
-        plan, run_state = orch.plan(request)
+        try:
+            plan, run_state = orch.plan(request)
+        except BlockedError as exc:
+            if exc.reason != "NOTHING_TO_RELEASE":
+                raise
+            # A re-run after a completed release is recognised, not reported as a failure.
+            return ExitCode.OK, {
+                "status": "ALREADY_RELEASED",
+                "message": exc.message,
+                **exc.details,
+            }
         result: dict[str, Any] = {
             "plan_id": plan.plan_id,
             "status": plan.status,
@@ -149,6 +259,24 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         return ExitCode.OK, orch.publish(plan, approve=args.approve)
     if args.command == "update-consumers":
         return ExitCode.OK, orch.update_consumers(plan, approve=args.approve, dry_run=args.dry_run)
+    if args.command == "push":
+        return ExitCode.OK, orch.push(plan, approve=args.approve)
+    if args.command == "pr-status":
+        status = orch.pr_status(plan)
+        approved = status.get("decision", {}).get("approved", True)
+        return (ExitCode.OK if approved else ExitCode.BLOCKED), status
+    if args.command == "reconcile-prs":
+        summary = orch.reconcile_prs(plan)
+        return (ExitCode.OK if summary["ok"] else ExitCode.BLOCKED), summary
+    if args.command == "record-pr":
+        return ExitCode.OK, orch.record_pr(
+            plan,
+            repository=args.repository,
+            head=args.head,
+            number=args.number,
+            url=args.url,
+            state=args.state,
+        )
     raise AssertionError(args.command)
 
 
@@ -196,6 +324,8 @@ def _text_summary(command: str, env: dict[str, Any]) -> str:
             lines.append("  Re-run with --approve once a human has reviewed the plan.")
         return "\n".join(lines)
     res = env["result"]
+    if command == "plan" and res.get("status") == "ALREADY_RELEASED":
+        return f"plan: ALREADY_RELEASED: {res['message']} ({res['released_in_revision'][:10]})"
     if command in ("plan",):
         plan = res["plan"]
         lines = [

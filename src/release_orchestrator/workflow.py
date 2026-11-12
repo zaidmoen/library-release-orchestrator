@@ -6,10 +6,11 @@ step, is idempotent, and records its outcome in the run state and report files.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, NoReturn, TypeVar
@@ -26,14 +27,21 @@ from release_orchestrator.errors import (
 )
 from release_orchestrator.fsutil import temp_dir
 from release_orchestrator.gitutil.history import HistoryScan, scan_history
-from release_orchestrator.gitutil.repo import Git, extract_tar
+from release_orchestrator.gitutil.repo import Git
 from release_orchestrator.integrations.github import GitHubPullRequestProvider
+from release_orchestrator.integrations.github_status import (
+    ApprovalPolicy,
+    GitHubReader,
+    evaluate_approval,
+)
 from release_orchestrator.integrations.jira import (
     FixtureIssueTracker,
     IssueTracker,
     NullIssueTracker,
 )
+from release_orchestrator.integrations.pr_reconcile import reconcile
 from release_orchestrator.integrations.pull_requests import (
+    ExternalPullRequestProvider,
     LocalPullRequestProvider,
     PullRequestProvider,
     PullRequestSpec,
@@ -63,7 +71,12 @@ from release_orchestrator.state import (
     RunStore,
 )
 from release_orchestrator.validation.runner import run_validation
-from release_orchestrator.versioning.registry import LocalRegistry, PackageRegistry
+from release_orchestrator.versioning.pypi import build_wheel, extract_artifact
+from release_orchestrator.versioning.registry import (
+    PackageRegistry,
+    PublishedArtifact,
+    build_registry,
+)
 from release_orchestrator.versioning.semver import SemVer
 
 log = logging.getLogger(__name__)
@@ -77,6 +90,7 @@ class RequestInput:
     commits: tuple[str, ...] = ()
     base: str | None = None
     source: str | None = None
+    prerelease: str | None = None
 
 
 @dataclass
@@ -87,6 +101,7 @@ class Services:
     registry: PackageRegistry
     prs: PullRequestProvider
     runs: RunStore
+    github: GitHubReader = field(default_factory=GitHubReader)
 
     @classmethod
     def from_config(cls, config: Config) -> Services:
@@ -103,15 +118,18 @@ class Services:
             prs = GitHubPullRequestProvider(
                 config.github_repositories, api_url=config.github_api_url
             )
+        elif config.pr_provider == "external":
+            prs = ExternalPullRequestProvider(config.state_dir / "pr-requests")
         else:
             prs = LocalPullRequestProvider(config.state_dir / "pull-requests")
         return cls(
             config,
             git,
             tracker,
-            LocalRegistry(config.registry_path),
+            build_registry(config),
             prs,
             RunStore(config.state_dir),
+            GitHubReader(api_url=config.github_api_url),
         )
 
 
@@ -183,6 +201,7 @@ class Orchestrator:
             request=resolved,
             tracker=self.s.tracker,
             registry=self.s.registry,
+            prerelease=request.prerelease,
         )
         run, created = self.s.runs.create_or_load(plan.plan_id, plan.library, plan.proposed_version)
         if created:
@@ -302,7 +321,7 @@ class Orchestrator:
 
     def open_pr(self, plan: ReleasePlan, *, approve: bool) -> dict[str, Any]:
         run = self._run(plan)
-        if run.state not in VALIDATED_STATES:
+        if not self._validated(run):
             raise BlockedError(
                 "Validation has not passed; refusing to prepare a PR",
                 reason="NOT_VALIDATED",
@@ -313,7 +332,7 @@ class Orchestrator:
         spec = PullRequestSpec(
             repository=self.config.library.name,
             head=plan.branch,
-            base=self.config.library.source_ref,
+            base=self._pr_base(run, plan),
             title=(
                 f"Release {plan.library} {plan.proposed_version} ({', '.join(plan.included_keys)})"
             ),
@@ -326,13 +345,14 @@ class Orchestrator:
 
     def publish(self, plan: ReleasePlan, *, approve: bool) -> dict[str, Any]:
         run = self._run(plan)
-        if run.state not in VALIDATED_STATES:
+        if not self._validated(run):
             raise BlockedError(
                 "Only validated releases can be published",
                 reason="NOT_VALIDATED",
                 details={"state": str(run.state)},
             )
         self._require_approval(run, plan, approve, "publish")
+        self._authorize_publication(run, plan)
         report = verify_release_branch(self.s.git, plan)
         if not report.ok:
             self._block(
@@ -366,19 +386,22 @@ class Orchestrator:
             "source_commits": plan.included_shas,
         }
         try:
+            filename, payload = self._artifact(head, version)
             artifact, created = self.s.registry.publish(
-                plan.library, version, self.s.git.archive_bytes(head), metadata
+                plan.library, version, payload, {**metadata, "filename": filename}
             )
         except ImmutableVersionError as exc:
             self._block(run, plan, exc)
         if tagged is None:
-            self.s.git.run("tag", tag, head)
+            # The artifact is already stored; if tagging fails the run is FAILED and a
+            # re-run finds the artifact (same digest) and only creates the missing tag.
+            self._guarded(run, plan, partial(self.s.git.run, "tag", tag, head))
         result = {
             "status": "published" if created else "already_published",
             "artifact": artifact.to_dict(),
             "tag": tag,
         }
-        if run.state is RunStatus.PR_READY:
+        if run.state in (RunStatus.PR_READY, RunStatus.FAILED):
             run.transition(RunStatus.PUBLISHED, f"{plan.library} {version} published")
         run.record("publish", result)
         self._save(plan, run)
@@ -396,18 +419,17 @@ class Orchestrator:
                 "installable",
                 reason="VERSION_NOT_PUBLISHED",
             )
-        if artifact.metadata.get("plan_id") != plan.plan_id:
-            raise BlockedError(
-                f"Published {plan.library} {version} was produced by a different plan",
-                reason="ARTIFACT_PLAN_MISMATCH",
-                details={"artifact_plan": artifact.metadata.get("plan_id")},
-            )
+        self._verify_artifact_identity(plan, artifact)
         if not dry_run:
             self._require_approval(run, plan, approve, "update-consumers")
         targets = [c for c in plan.consumers if c["action"] == "update"]
         results: list[dict[str, Any]] = []
         with temp_dir("lro-artifact-") as library_dir:
-            extract_tar(self.s.registry.fetch(plan.library, version), library_dir)
+            extract_artifact(
+                self.s.registry.artifact_kind,
+                self.s.registry.fetch(plan.library, version),
+                library_dir,
+            )
             for target in targets:
                 consumer = self.config.consumer(target["name"])
                 update = self._guarded(
@@ -461,7 +483,271 @@ class Orchestrator:
         self._save(plan, run)
         return summary
 
+    def push(self, plan: ReleasePlan, *, approve: bool) -> dict[str, Any]:
+        """Push the release branch (+ tag once published) and prepared consumer branches.
+
+        Only to remotes in ``remote_allowlist``; one ref per push; never forced.
+        """
+        run = self._run(plan)
+        if not self._validated(run):
+            raise BlockedError(
+                "Only verified and validated releases can be pushed",
+                reason="NOT_VALIDATED",
+                details={"state": str(run.state)},
+            )
+        if not self.config.remote_allowlist:
+            raise BlockedError(
+                "remote_allowlist is empty; nothing may be pushed", reason="NO_REMOTE_ALLOWLIST"
+            )
+        report = verify_release_branch(self.s.git, plan)
+        if not report.ok:
+            self._block(
+                run,
+                plan,
+                BlockedError(
+                    "Release branch does not match the plan",
+                    reason="MANIFEST_MISMATCH",
+                    details=report.to_dict(),
+                ),
+            )
+        if not approve:
+            raise ApprovalRequiredError(
+                "'push' writes to remote repositories and needs --approve",
+                details={"step": "push", "plan_id": plan.plan_id},
+            )
+        allow = self.config.remote_allowlist
+        remote = self.config.remote_name
+        pushed = [self.s.git.push_ref(remote, f"refs/heads/{plan.branch}", allowlist=allow)]
+        integration = integration_branch(self.config, plan)
+        if integration and self.s.git.branch_exists(integration):
+            pushed.append(self.s.git.push_ref(remote, f"refs/heads/{integration}", allowlist=allow))
+        tag = f"{self.config.library.tag_prefix}{plan.proposed_version}"
+        if "publish" in run.steps and self.s.git.try_rev_parse(f"refs/tags/{tag}"):
+            pushed.append(self.s.git.push_ref(remote, f"refs/tags/{tag}", allowlist=allow))
+        consumers = run.steps.get("update-consumers", {}).get("result", {}).get("updated", [])
+        for update in consumers:
+            if update["status"] in ("prepared", "already_prepared"):
+                git = Git(self.config.consumer(update["consumer"]).repo)
+                pushed.append(
+                    {
+                        "consumer": update["consumer"],
+                        **git.push_ref(remote, f"refs/heads/{update['branch']}", allowlist=allow),
+                    }
+                )
+        run.record("push", pushed)
+        self._save(plan, run)
+        return {"pushed": pushed}
+
+    def record_pr(
+        self, plan: ReleasePlan, *, repository: str, head: str, number: int, url: str, state: str
+    ) -> dict[str, Any]:
+        if not isinstance(self.s.prs, ExternalPullRequestProvider):
+            raise InvalidInputError("record-pr is only used with pull_requests.provider: external")
+        run = self._run(plan)
+        try:
+            recorded = self.s.prs.record(repository, head, number=number, url=url, state=state)
+        except (FileNotFoundError, ValueError) as exc:
+            raise InvalidInputError(str(exc)) from exc
+        prs = dict(run.steps.get("recorded-prs", {}).get("result", {}))
+        prs[f"{repository}:{head}"] = {"number": number, "url": url, "state": state}
+        run.record("recorded-prs", prs)
+        self._save(plan, run)
+        return recorded
+
+    def reconcile_prs(self, plan: ReleasePlan) -> dict[str, Any]:
+        """Compare recorded PR requests with the PRs GitHub actually has (ADR-0010).
+
+        Read-only towards the remote. Locally it records PRs it discovers. Run it before
+        creating any PR externally: a ``discovered`` or ``recorded_verified`` result means
+        the PR already exists and must not be created again.
+        """
+        if not isinstance(self.s.prs, ExternalPullRequestProvider):
+            raise InvalidInputError("reconcile-prs applies to pull_requests.provider: external")
+        run = self._run(plan)
+        remote = self.config.remote_name
+        targets: list[tuple[str, str, Git]] = [(self.config.library.name, plan.branch, self.s.git)]
+        consumers = run.steps.get("update-consumers", {}).get("result", {}).get("updated", [])
+        for update in consumers:
+            if update["status"] in ("prepared", "already_prepared"):
+                repo = Git(self.config.consumer(update["consumer"]).repo)
+                targets.append((update["consumer"], update["branch"], repo))
+        results = [
+            reconcile(self.s.prs, repository=name, head=head, git=git, remote=remote).to_dict()
+            for name, head, git in targets
+        ]
+        summary = {"ok": all(r["ok"] for r in results), "pull_requests": results}
+        run.record("reconcile-prs", summary)
+        self._save(plan, run)
+        return summary
+
+    def pr_status(self, plan: ReleasePlan, run: RunState | None = None) -> dict[str, Any]:
+        """Authoritative PR state from GitHub plus the approval decision (ADR-0011).
+
+        ``run`` lets a caller that already holds the run state (``publish``) pass it in, so
+        the evidence is recorded on the same object that is saved last (no lost update).
+        """
+        run = run if run is not None else self._run(plan)
+        policy = self.config.approval_policy
+        repository = self.config.github_repositories.get(self.config.library.name)
+        if not repository:
+            raise BlockedError(
+                f"No GitHub repository mapped for '{self.config.library.name}' "
+                "(pull_requests.github_repositories)",
+                reason="GITHUB_REPO_UNMAPPED",
+            )
+        number = self._recorded_pr_number(plan)
+        report = verify_release_branch(self.s.git, plan)
+        if not report.ok or report.head is None:
+            self._block(
+                run,
+                plan,
+                BlockedError(
+                    "Release branch does not match the plan",
+                    reason="MANIFEST_MISMATCH",
+                    details=report.to_dict(),
+                ),
+            )
+        evidence = self.s.github.evidence(repository, number)
+        result: dict[str, Any] = {"repository": repository, "evidence": evidence.to_dict()}
+        if policy is not None:
+            decision = evaluate_approval(
+                evidence,
+                ApprovalPolicy(
+                    policy.required_approvals,
+                    policy.required_checks,
+                    policy.require_ready_for_review,
+                    policy.min_reviewer_permission,
+                    policy.require_branch_protection_evidence,
+                ),
+                expected_head=str(report.head),
+            )
+            result["policy"] = asdict(policy)
+            result["decision"] = decision.to_dict()
+        run.record("pr-status", result)
+        self._save(plan, run)
+        return result
+
+    def _recorded_pr_number(self, plan: ReleasePlan) -> int:
+        record = (
+            self.s.prs.get(self.config.library.name, plan.branch)
+            if isinstance(self.s.prs, ExternalPullRequestProvider)
+            else None
+        )
+        if not record or record.get("number") is None:
+            raise BlockedError(
+                "No library PR is recorded for this release; run reconcile-prs (or record-pr) "
+                "after the PR exists",
+                reason="PR_NOT_RECORDED",
+            )
+        return int(record["number"])
+
+    def _authorize_publication(self, run: RunState, plan: ReleasePlan) -> None:
+        """Publishing needs more than the operator's --approve (ADR-0011). Fail closed.
+
+        * A **production** registry is always refused. A GitHub review approves *code*; it
+          is not authorization to publish to production. No separate production
+          authorization source (e.g. a GitHub deployment environment with required
+          reviewers) is implemented, so the only safe answer is no.
+        * ``approval_policy`` configured: a GitHub review approval on the exact release
+          commit, by a reviewer with verified permission, plus green required checks.
+          Anything unverifiable counts as not approved.
+        """
+        if self.config.registry_production:
+            self._block(
+                run,
+                plan,
+                BlockedError(
+                    "Publishing to a production registry is not authorized: GitHub review "
+                    "approval is not production authorization, and no production "
+                    "authorization source is configured",
+                    reason="PRODUCTION_PUBLISH_UNAUTHORIZED",
+                    details={
+                        "registry": self.config.registry_url or str(self.config.registry_path)
+                    },
+                ),
+            )
+        if self.config.approval_policy is not None:
+            status = self.pr_status(plan, run)
+            decision = status["decision"]
+            if not decision["approved"]:
+                self._block(
+                    run,
+                    plan,
+                    BlockedError(
+                        "Release approval is not verified on GitHub; publication refused",
+                        reason="APPROVAL_NOT_VERIFIED",
+                        details=decision,
+                    ),
+                )
+
     # ------------------------------------------------------------------ helpers
+    def _artifact(self, head: str, version: SemVer) -> tuple[str, bytes]:
+        """The deterministic artifact for a release commit (same commit → same sha256)."""
+        if self.s.registry.artifact_kind == "wheel":
+            return build_wheel(self.s.git, head, expected_version=version)
+        return f"{self.config.library.name}-{version}.tar", self.s.git.archive_bytes(head)
+
+    def _verify_artifact_identity(self, plan: ReleasePlan, artifact: PublishedArtifact) -> None:
+        """Is the published artifact *this* plan's release? Verified, never assumed."""
+        plan_id = artifact.metadata.get("plan_id")
+        if plan_id is not None:
+            if plan_id != plan.plan_id:
+                raise BlockedError(
+                    f"Published {plan.library} {artifact.version} was produced by a different plan",
+                    reason="ARTIFACT_PLAN_MISMATCH",
+                    details={"artifact_plan": plan_id},
+                )
+            return
+        # Index registries carry no provenance metadata: rebuild from the verified release
+        # commit and compare digests (wheels are reproducible, ADR-0012).
+        report = verify_release_branch(self.s.git, plan)
+        if not report.ok or report.head is None:
+            raise BlockedError(
+                "Release branch does not match the plan",
+                reason="MANIFEST_MISMATCH",
+                details=report.to_dict(),
+            )
+        _, payload = self._artifact(report.head, SemVer.parse(plan.proposed_version))
+        rebuilt = hashlib.sha256(payload).hexdigest()
+        if rebuilt != artifact.sha256:
+            raise BlockedError(
+                f"Published {plan.library} {artifact.version} does not match a rebuild of the "
+                "release commit",
+                reason="ARTIFACT_PLAN_MISMATCH",
+                details={"published_sha256": artifact.sha256, "rebuilt_sha256": rebuilt},
+            )
+
+    def _pr_base(self, run: RunState, plan: ReleasePlan) -> str:
+        """Base branch of the library release PR (ADR-0009).
+
+        ``integration``: a branch pinned at the release base, created here if missing, so
+        the PR shows exactly the release delta and merging it never touches the trunk.
+        """
+        branch = integration_branch(self.config, plan)
+        if branch is None:
+            return self.config.library.source_ref
+        existing = self.s.git.try_rev_parse(f"refs/heads/{branch}")
+        if existing is None:
+            self.s.git.create_branch(branch, plan.base_revision)
+        elif existing != plan.base_revision:
+            self._block(
+                run,
+                plan,
+                BlockedError(
+                    f"Integration branch '{branch}' exists at {existing[:10]}, not at the release "
+                    f"base {plan.base_revision[:10]}; it was not moved",
+                    reason="INTEGRATION_BRANCH_MISMATCH",
+                    details={"branch": branch, "sha": existing, "expected": plan.base_revision},
+                ),
+            )
+        return branch
+
+    def _validated(self, run: RunState) -> bool:
+        if run.state in VALIDATED_STATES:
+            return True
+        last = run.steps.get("validate", {}).get("result", {})
+        return run.state is RunStatus.FAILED and last.get("status") == "PASSED"
+
     def _run(self, plan: ReleasePlan) -> RunState:
         run = self.s.runs.load(plan.plan_id)
         if run is None:
@@ -520,3 +806,10 @@ def write_plan(plan: ReleasePlan, out: Path) -> tuple[Path, Path]:
     md = out.with_suffix(".md")
     md.write_text(render_plan(plan), encoding="utf-8")
     return out, md
+
+
+def integration_branch(config: Config, plan: ReleasePlan) -> str | None:
+    """``release-base/<base_ref>`` when release PRs target an integration branch."""
+    if config.library.release_pr_target != "integration":
+        return None
+    return f"release-base/{plan.base_ref}"

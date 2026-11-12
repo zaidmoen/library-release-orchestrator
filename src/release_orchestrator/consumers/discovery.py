@@ -106,8 +106,12 @@ def assess_consumer(
     target.operator = requirement.operator
     imported = library_imports(git, rev, top_package)
     target.imported_modules = sorted(imported)
+    # A consumer is impacted when it imports a changed module, a parent package of one,
+    # or anything from the top-level package (``import zaidlibrary``) when that changed.
+    # Importing ``zaidlibrary.payments`` does NOT make it impacted by an ``__init__``-only
+    # change (e.g. the version bump or an export of another module).
     impacted = top_package in imported or any(
-        m == a or m.startswith(a + ".") or a.startswith(m + ".")
+        m == a or a.startswith(m + ".") or (m.startswith(a + ".") and a != top_package)
         for m in imported
         for a in affected_modules
     )
