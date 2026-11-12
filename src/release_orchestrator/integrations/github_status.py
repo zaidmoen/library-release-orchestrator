@@ -1,15 +1,16 @@
 """Authoritative pull request state from the GitHub REST API (read-only, ADR-0011).
 
 Git refs (ADR-0010) prove a PR exists and which commit it points at. Only the API knows
-whether it is open, draft or merged, who reviewed which commit, and how the checks
-concluded. This reader fetches exactly that, with:
+whether it is open, draft or merged, who reviewed which commit with what permission, and
+how the checks concluded. This reader fetches exactly that, with:
 
-* an optional token from ``GITHUB_TOKEN`` (public repositories work anonymously; private
-  ones need a token with read access to pull requests and checks only);
-* bounded retries for transient failures (network, 5xx, secondary rate limit);
-* explicit, non-retried failures for auth (401), no access or not found (403/404).
+* an optional token from ``GITHUB_TOKEN`` (public repositories work anonymously for PR,
+  review and check data; reviewer permissions and branch protection need a token);
+* bounded retries for transient failures (network, 5xx, rate limit);
+* explicit, non-retried failures for auth or access (401/403/404).
 
-It has no write methods.
+Everything the policy needs but can't read is recorded as **unverified**, and the policy
+fails closed on it. It has no write methods.
 """
 
 from __future__ import annotations
@@ -23,6 +24,8 @@ from typing import Any
 
 from release_orchestrator.errors import IntegrationError
 from release_orchestrator.integrations.github import Transport, urllib_transport
+
+PERMISSION_RANK = {"none": 0, "read": 1, "triage": 2, "write": 3, "maintain": 4, "admin": 5}
 
 
 class GitHubAccessError(IntegrationError):
@@ -51,6 +54,7 @@ class Review:
     state: str  # APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING
     commit_id: str
     submitted_at: str
+    association: str = ""  # author_association, recorded for audit
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,10 @@ class PullEvidence:
     reviews: list[Review]
     checks: list[CheckRun]
     fetched_at: str
+    statuses: dict[str, str] = field(default_factory=dict)  # legacy commit status contexts
+    permissions: dict[str, str] = field(default_factory=dict)  # reviewer -> level|unverified
+    protection_checks: list[str] | None = None  # required checks from branch protection
+    protection_note: str = "not requested"
     source: str = "github-rest"
 
     def to_dict(self) -> dict[str, Any]:
@@ -74,6 +82,12 @@ class PullEvidence:
             "pull": asdict(self.pull),
             "reviews": [asdict(r) for r in self.reviews],
             "checks": [asdict(c) for c in self.checks],
+            "statuses": self.statuses,
+            "permissions": self.permissions,
+            "branch_protection": {
+                "required_checks": self.protection_checks,
+                "note": self.protection_note,
+            },
             "fetched_at": self.fetched_at,
             "source": self.source,
         }
@@ -122,7 +136,7 @@ class GitHubReader:
             if status == 200:
                 return data
             if status in (401, 403, 404) and "rate limit" not in message.lower():
-                hint = "" if self._token else " (no GITHUB_TOKEN set; private repos need one)"
+                hint = "" if self._token else " (no GITHUB_TOKEN set; private data needs one)"
                 raise GitHubAccessError(
                     f"GitHub GET {path} returned {status}: {message}{hint}",
                     details={"status": status, "path": path, "authenticated": self.authenticated},
@@ -158,13 +172,13 @@ class GitHubReader:
                 state=str(r.get("state", "")),
                 commit_id=str(r.get("commit_id") or ""),
                 submitted_at=str(r.get("submitted_at") or ""),
+                association=str(r.get("author_association") or ""),
             )
             for r in data
         ]
 
     def check_runs(self, repository: str, sha: str) -> list[CheckRun]:
-        if not all(c in "0123456789abcdef" for c in sha) or len(sha) != 40:
-            raise ValueError("sha must be a full 40-character hex commit id")
+        _sha(sha)
         data = self._get(f"/repos/{_repo(repository)}/commits/{sha}/check-runs?per_page=100")
         return [
             CheckRun(
@@ -176,14 +190,46 @@ class GitHubReader:
             for c in data.get("check_runs", [])
         ]
 
+    def commit_statuses(self, repository: str, sha: str) -> dict[str, str]:
+        """Legacy commit statuses (``context -> state``), latest per context."""
+        _sha(sha)
+        data = self._get(f"/repos/{_repo(repository)}/commits/{sha}/status")
+        return {str(s["context"]): str(s["state"]) for s in data.get("statuses", [])}
+
+    def permission(self, repository: str, user: str) -> str:
+        quoted = urllib.parse.quote(user, safe="")
+        data = self._get(f"/repos/{_repo(repository)}/collaborators/{quoted}/permission")
+        return str(data.get("permission", "none"))
+
+    def protection_required_checks(self, repository: str, branch: str) -> list[str]:
+        quoted = urllib.parse.quote(branch, safe="")
+        data = self._get(f"/repos/{_repo(repository)}/branches/{quoted}/protection")
+        checks = (data.get("required_status_checks") or {}).get("contexts") or []
+        return [str(c) for c in checks]
+
     def evidence(self, repository: str, number: int) -> PullEvidence:
         pull = self.pull(repository, number)
-        return PullEvidence(
+        reviews = self.reviews(repository, number)
+        ev = PullEvidence(
             pull=pull,
-            reviews=self.reviews(repository, number),
+            reviews=reviews,
             checks=self.check_runs(repository, pull.head_sha),
+            statuses=self.commit_statuses(repository, pull.head_sha),
             fetched_at=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         )
+        # Permission only matters for reviewers who approved; never assume it.
+        for user in sorted({r.user for r in reviews if r.state == "APPROVED"} - {pull.author}):
+            try:
+                ev.permissions[user] = self.permission(repository, user)
+            except GitHubAccessError as exc:
+                ev.permissions[user] = f"unverified ({exc.details.get('status')})"
+        try:
+            ev.protection_checks = self.protection_required_checks(repository, pull.base_ref)
+            ev.protection_note = "read"
+        except GitHubAccessError as exc:
+            # Unreadable is NOT the same as unprotected: record it, never infer "none".
+            ev.protection_note = f"unverified ({exc.details.get('status')})"
+        return ev
 
 
 def _repo(repository: str) -> str:
@@ -193,12 +239,19 @@ def _repo(repository: str) -> str:
     return f"{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(name, safe='')}"
 
 
+def _sha(sha: str) -> None:
+    if len(sha) != 40 or not all(c in "0123456789abcdef" for c in sha):
+        raise ValueError("sha must be a full 40-character hex commit id")
+
+
 # --------------------------------------------------------------------------- approval policy
 @dataclass(frozen=True)
 class ApprovalPolicy:
     required_approvals: int = 1
     required_checks: tuple[str, ...] = ()
     require_ready_for_review: bool = True  # a draft PR is not an approved release
+    min_reviewer_permission: str = "write"
+    require_branch_protection_evidence: bool = False
 
 
 @dataclass
@@ -207,6 +260,7 @@ class ApprovalDecision:
     head_sha: str
     approvers: list[str] = field(default_factory=list)
     stale_approvals: list[str] = field(default_factory=list)
+    unauthorized_approvals: list[str] = field(default_factory=list)
     changes_requested_by: list[str] = field(default_factory=list)
     checks: dict[str, str] = field(default_factory=dict)
     reasons: list[str] = field(default_factory=list)
@@ -218,14 +272,18 @@ class ApprovalDecision:
 def evaluate_approval(
     evidence: PullEvidence, policy: ApprovalPolicy, *, expected_head: str
 ) -> ApprovalDecision:
-    """Deterministic: the same evidence and policy always give the same decision.
+    """Deterministic and fail-closed: the same evidence and policy give the same decision.
 
-    * Only each reviewer's **latest** review counts. ``APPROVED`` counts only if it was
-      given on the PR's current head commit, which must equal ``expected_head`` (the
-      verified release commit). Approvals of older commits are reported as stale.
-    * Any reviewer whose latest review is ``CHANGES_REQUESTED`` blocks.
-    * The PR author never counts as an approver.
-    * Every required check must have completed with ``success`` on the head commit.
+    * The PR must be open, not merged, not a draft (by policy), and its head must be the
+      verified release commit.
+    * Only each reviewer's latest decisive review (APPROVED / CHANGES_REQUESTED /
+      DISMISSED) counts, so a dismissal revokes an earlier approval. An approval counts
+      only if it is on the current head (else **stale**) and the reviewer's repository
+      permission is verified at least ``min_reviewer_permission`` (else **unauthorized**,
+      including when the permission can't be read). The author never counts.
+    * Required checks = the policy's checks plus branch-protection checks when readable.
+      Each must have succeeded on the head, as the latest check run or a commit status.
+      Unreadable branch protection fails when the policy requires that evidence.
     """
     pull = evidence.pull
     decision = ApprovalDecision(approved=False, head_sha=pull.head_sha)
@@ -238,6 +296,7 @@ def evaluate_approval(
             f"PR head {pull.head_sha[:10]} is not the verified release commit {expected_head[:10]}"
         )
 
+    minimum = PERMISSION_RANK.get(policy.min_reviewer_permission, PERMISSION_RANK["admin"])
     latest: dict[str, Review] = {}
     for review in sorted(evidence.reviews, key=lambda r: r.submitted_at):
         if review.state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
@@ -248,31 +307,47 @@ def evaluate_approval(
         if review.state == "CHANGES_REQUESTED":
             decision.changes_requested_by.append(user)
         elif review.state == "APPROVED":
-            if review.commit_id == pull.head_sha:
-                decision.approvers.append(user)
-            else:
+            level = evidence.permissions.get(user, "unverified")
+            if review.commit_id != pull.head_sha:
                 decision.stale_approvals.append(f"{user}@{review.commit_id[:10]}")
+            elif PERMISSION_RANK.get(level, -1) < minimum:
+                decision.unauthorized_approvals.append(f"{user} ({level})")
+            else:
+                decision.approvers.append(user)
     if decision.changes_requested_by:
         decision.reasons.append(f"changes requested by {decision.changes_requested_by}")
     if len(decision.approvers) < policy.required_approvals:
+        detail = ""
+        if decision.stale_approvals:
+            detail += f"; stale: {decision.stale_approvals}"
+        if decision.unauthorized_approvals:
+            detail += (
+                f"; not counted (permission below {policy.min_reviewer_permission} or "
+                f"unverifiable): {decision.unauthorized_approvals}"
+            )
         decision.reasons.append(
-            f"{len(decision.approvers)} current approval(s), {policy.required_approvals} required"
-            + (f"; stale: {decision.stale_approvals}" if decision.stale_approvals else "")
+            f"{len(decision.approvers)} valid approval(s), {policy.required_approvals} required"
+            + detail
         )
 
-    # A check can run several times on one commit (re-runs, push + pull_request events):
-    # only the most recently started run of each name counts.
+    required = list(policy.required_checks)
+    if evidence.protection_checks is not None:
+        required += [c for c in evidence.protection_checks if c not in required]
+    elif policy.require_branch_protection_evidence:
+        decision.reasons.append(
+            f"branch protection could not be read ({evidence.protection_note}); policy requires it"
+        )
     runs: dict[str, CheckRun] = {}
     for check in sorted(evidence.checks, key=lambda c: c.started_at):
-        runs[check.name] = check
-    for name in policy.required_checks:
+        runs[check.name] = check  # latest run per name
+    for name in required:
         run = runs.get(name)
-        if run is None:
-            decision.checks[name] = "missing"
-        elif run.status != "completed":
-            decision.checks[name] = run.status
+        if run is not None:
+            decision.checks[name] = str(run.conclusion) if run.status == "completed" else run.status
+        elif name in evidence.statuses:
+            decision.checks[name] = evidence.statuses[name]  # success|failure|error|pending
         else:
-            decision.checks[name] = str(run.conclusion)
+            decision.checks[name] = "missing"
     failing = {n: s for n, s in decision.checks.items() if s != "success"}
     if failing:
         decision.reasons.append(f"required checks not successful: {failing}")

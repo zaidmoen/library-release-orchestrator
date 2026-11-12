@@ -25,7 +25,7 @@ compare-and-swap revisions, reports, PR requests and the environment ledger.
 | PR discovery and reconciliation via refs | **VERIFIED LIVE** (read-only) | PR #1 and #2 found; lab `not_created` |
 | Authoritative PR status, reviews, checks | **VERIFIED LIVE** (read-only, public repo) | `github-pr-status` on PR #2 |
 | Approval policy (current-head approvals, stale, change requests, checks) | VERIFIED LOCALLY + live read | `test_github_status.py`, `test_publish_authorization.py`; PR #2 correctly "not approved" |
-| Publication gated on verified approval; production publish without policy rejected | VERIFIED LOCALLY | `test_publish_authorization.py` |
+| Publication gated on verified approval (current-head, verified reviewer permission, green checks; fail closed); production registry always refused | VERIFIED LOCALLY | `test_publish_authorization.py`, `test_github_status.py` |
 | Package index publication (PEP 503), immutability, reconciliation, concurrency | VERIFIED LOCALLY against a real pypiserver | `test_pypi_registry.py` |
 | Production registry | NOT EXERCISED (by design) | needs credentials and explicit authorization |
 | Reproducible wheels | VERIFIED LOCALLY | identical sha256 across builds |

@@ -190,6 +190,7 @@ The authoritative, evidence-linked matrix is [docs/engineering-assessment.md](do
 | PEP 503 package index with reproducible wheels, never-overwrite, lost-response reconciliation (ADR-0012) | Verified locally against a real pypiserver; no production index |
 | Issue eligibility from timestamped snapshots: status, blockers, cycles, staleness (ADR-0013) | Verified locally; live Jira **blocked** |
 | Run-state optimistic concurrency, structured transition logs | Verified locally |
+| Security hardening: strict URL/origin validation, explicit registry classification, fail-closed approvals (verified reviewer permission, dismissals, statuses, unreadable protection), production publication refused | Verified locally (`test_config_security.py`, `test_github_status.py`, `test_publish_authorization.py`) |
 | RC → final promotion | **Not implemented** |
 
 Operations: [runbook](docs/operations-runbook.md) · [integrations](docs/integrations.md) · [testing strategy](docs/testing-strategy.md) · [live GitHub validation](docs/live-github-validation.md)

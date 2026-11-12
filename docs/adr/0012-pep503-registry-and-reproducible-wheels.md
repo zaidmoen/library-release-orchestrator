@@ -32,9 +32,17 @@ embeds the build time, so every retry would look like a conflict.
   | F: 401/403 or missing credentials | `RegistryAuthError`, not retried, nothing published |
   | G: concurrent publishers | the index decides: identical content is idempotent, different content conflicts; exactly one content wins |
 
-* Credentials come from environment variables named in config (`username_env`,
-  `password_env`) and are never logged. Plain `http` is accepted only for
-  `127.0.0.1`/`localhost` test indexes.
+* Credentials come from environment variables **named** in config (`username_env`,
+  `password_env` must look like `NAME`, not a value) and are never logged.
+* `registry.url` is parsed with `urllib.parse`, never prefix-matched: `https` for any host;
+  plain `http` only when the hostname is exactly `127.0.0.1`, `localhost` or `::1`
+  (`http://localhost.evil.example` is rejected). Embedded credentials, queries and
+  fragments are rejected.
+* A `pypi` registry must state `production: true|false` explicitly. `production: false` is
+  accepted only for loopback hosts or hosts listed in `nonproduction_hosts`, so a real
+  index can't be mislabelled into skipping the production gate.
+* Index file links must stay on the configured registry origin (scheme, host, port).
+  A link to a foreign host is refused, a supply-chain guard.
 * Index registries carry no provenance metadata, so `update-consumers` verifies a
   published artifact by **rebuilding** it from the verified release commit and comparing
   sha256 (`ARTIFACT_PLAN_MISMATCH` otherwise). Downloads are always digest-checked.

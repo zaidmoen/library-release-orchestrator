@@ -25,6 +25,7 @@ class FakeGitHub:
 
     def __init__(self, head: str) -> None:
         self.head, self.draft, self.reviews, self.checks = head, False, [], []
+        self.permission: tuple[int, dict[str, str]] = (200, {"permission": "write"})
         self.calls: list[str] = []
 
     def __call__(self, method, url, headers, body):  # type: ignore[no-untyped-def]
@@ -45,6 +46,10 @@ class FakeGitHub:
             return 200, self.reviews
         if "/check-runs" in url:
             return 200, {"check_runs": self.checks}
+        if url.endswith("/status"):
+            return 200, {"statuses": []}
+        if url.endswith("/permission"):
+            return self.permission
         return 404, {"message": "Not Found"}
 
 
@@ -112,7 +117,19 @@ def test_publish_without_recorded_pr_is_refused(tmp_path):
     assert lab.orch.s.registry.list_versions("zaidlibrary") == []
 
 
-@pytest.mark.parametrize("case", ["draft", "no_review", "stale", "failed_check", "changes"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        "draft",
+        "no_review",
+        "stale",
+        "failed_check",
+        "changes",
+        "read_only",
+        "perm_hidden",
+        "dismissed",
+    ],
+)
 def test_unverified_approval_blocks_publication(tmp_path, case):
     lab = _lab(tmp_path, POLICY)
     plan, head, fake = _validated(lab)
@@ -126,6 +143,20 @@ def test_unverified_approval_blocks_publication(tmp_path, case):
         fake.reviews = _approved("0" * 40)
     elif case == "failed_check":
         fake.checks = [{**GREEN[0], "conclusion": "failure"}]
+    elif case == "read_only":
+        fake.permission = (200, {"permission": "read"})
+    elif case == "perm_hidden":
+        fake.permission = (403, {"message": "Must have push access"})
+    elif case == "dismissed":
+        fake.reviews = [
+            *_approved(head),
+            {
+                "user": {"login": "reviewer"},
+                "state": "DISMISSED",
+                "commit_id": head,
+                "submitted_at": "2026-11-10T12:00:00Z",
+            },
+        ]
     elif case == "changes":
         fake.reviews = [
             *_approved(head),
@@ -179,6 +210,24 @@ def test_production_registry_without_policy_rejects_publish(tmp_path):
     plan = lab.plan("FIN-204")
     lab.orch.prepare(plan, approve=True, dry_run=False)
     lab.orch.validate(plan)
+    with pytest.raises(BlockedError) as exc:
+        lab.orch.publish(plan, approve=True)
+    assert exc.value.reason == "PRODUCTION_PUBLISH_UNAUTHORIZED"
+    assert lab.orch.s.registry.list_versions("zaidlibrary") == []
+
+
+def test_production_registry_is_refused_even_with_verified_github_approval(tmp_path):
+    lab = _lab(tmp_path, POLICY)
+    config = lab.config_path
+    config.write_text(
+        config.read_text().replace(
+            "registry:\n  provider: local\n", "registry:\n  provider: local\n  production: true\n"
+        )
+    )
+    lab.reload()
+    plan, head, fake = _validated(lab)
+    _record(lab, plan)
+    fake.reviews, fake.checks = _approved(head), GREEN
     with pytest.raises(BlockedError) as exc:
         lab.orch.publish(plan, approve=True)
     assert exc.value.reason == "PRODUCTION_PUBLISH_UNAUTHORIZED"

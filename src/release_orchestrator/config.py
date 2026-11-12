@@ -8,6 +8,7 @@ Git operation runs.
 from __future__ import annotations
 
 import re
+import urllib.parse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,9 @@ import yaml
 from release_orchestrator.errors import ConfigError
 
 SUPPORTED_SCHEMA_VERSIONS = {1}
+LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+PERMISSION_LEVELS = ("read", "triage", "write", "maintain", "admin")
+_ENV_NAME_RE = re.compile(r"^[A-Z_][A-Z0-9_]{0,63}$")
 ALLOWED_PLACEHOLDERS = {"python", "library_path"}
 _PLACEHOLDER_RE = re.compile(r"\{([^{}]*)\}")
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -66,6 +70,8 @@ class ApprovalPolicyConfig:
     required_approvals: int = 1
     required_checks: tuple[str, ...] = ()
     require_ready_for_review: bool = True
+    min_reviewer_permission: str = "write"
+    require_branch_protection_evidence: bool = False
 
 
 @dataclass(frozen=True)
@@ -159,7 +165,7 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
         isinstance(x, list) and all(isinstance(i, str) for i in x) for x in (statuses, resolved)
     ):
         raise ConfigError("issue_tracker statuses must be lists of strings")
-    if max_age is not None and (not isinstance(max_age, int) or max_age < 1):
+    if max_age is not None and (not _is_int(max_age) or max_age < 1):
         raise ConfigError("issue_tracker.max_age_minutes must be a positive integer")
 
     registry = _mapping(raw, "registry")
@@ -170,10 +176,25 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
     if registry_provider == "pypi":
         for key in ("url", "username_env", "password_env"):
             _str(registry, key)
-        if not str(registry["url"]).startswith(
-            ("https://", "http://127.0.0.1", "http://localhost")
+        _env_name(registry["username_env"], "registry.username_env")
+        _env_name(registry["password_env"], "registry.password_env")
+        host = validate_registry_url(str(registry["url"]))
+        # A remote index must be classified explicitly: "production: false" may not be used
+        # to slip a real index past the production gate by omission or mislabelling.
+        if "production" not in registry:
+            raise ConfigError("registry.production must be set explicitly for a pypi registry")
+        nonprod = registry.get("nonproduction_hosts", [])
+        if not isinstance(nonprod, list) or not all(isinstance(h, str) for h in nonprod):
+            raise ConfigError("registry.nonproduction_hosts must be a list of hostnames")
+        if (
+            not registry_production
+            and host not in LOOPBACK_HOSTS
+            and host not in {h.lower() for h in nonprod}
         ):
-            raise ConfigError("registry.url must be https (plain http only for a local test index)")
+            raise ConfigError(
+                f"registry host {host!r} is marked production: false but is neither loopback nor "
+                "listed in registry.nonproduction_hosts; classify it explicitly"
+            )
 
     prs = raw.get("pull_requests") or {}
     if not isinstance(prs, dict):
@@ -270,7 +291,7 @@ def _commands(raw: Any, where: str) -> tuple[CommandSpec, ...]:
                         details={"allowed": sorted(ALLOWED_PLACEHOLDERS)},
                     )
         timeout = entry.get("timeout_seconds", 600)
-        if not isinstance(timeout, int) or not 1 <= timeout <= 3600:
+        if not _is_int(timeout) or not 1 <= timeout <= 3600:
             raise ConfigError(f"{where}: timeout_seconds must be an integer in [1, 3600]")
         specs.append(
             CommandSpec(
@@ -358,7 +379,7 @@ def _environments(raw: Any) -> tuple[EnvironmentConfig, ...]:
         if not isinstance(item, dict):
             raise ConfigError("each environment must be a mapping")
         approvals = item.get("required_approvals", 1)
-        if not isinstance(approvals, int) or not 1 <= approvals <= 10:
+        if not _is_int(approvals) or not 1 <= approvals <= 10:
             raise ConfigError("required_approvals must be an integer in [1, 10]")
         allow = item.get("allow_prerelease", True)
         if not isinstance(allow, bool):
@@ -382,12 +403,66 @@ def _approval_policy(raw: Any) -> ApprovalPolicyConfig | None:
     if not isinstance(raw, dict):
         raise ConfigError("approval_policy must be a mapping")
     approvals = raw.get("required_approvals", 1)
-    if not isinstance(approvals, int) or not 1 <= approvals <= 10:
+    if not _is_int(approvals) or not 1 <= approvals <= 10:
         raise ConfigError("approval_policy.required_approvals must be an integer in [1, 10]")
     checks = raw.get("required_checks", [])
-    if not isinstance(checks, list) or not all(isinstance(c, str) and c for c in checks):
+    if not isinstance(checks, list) or not all(isinstance(c, str) and c.strip() for c in checks):
         raise ConfigError("approval_policy.required_checks must be a list of check names")
+    if len(set(checks)) != len(checks):
+        raise ConfigError("approval_policy.required_checks contains duplicates")
     ready = raw.get("require_ready_for_review", True)
     if not isinstance(ready, bool):
         raise ConfigError("approval_policy.require_ready_for_review must be a boolean")
-    return ApprovalPolicyConfig(approvals, tuple(checks), ready)
+    permission = raw.get("min_reviewer_permission", "write")
+    if permission not in PERMISSION_LEVELS:
+        raise ConfigError(
+            f"approval_policy.min_reviewer_permission must be one of {PERMISSION_LEVELS}"
+        )
+    protection = raw.get("require_branch_protection_evidence", False)
+    if not isinstance(protection, bool):
+        raise ConfigError("approval_policy.require_branch_protection_evidence must be a boolean")
+    unknown = set(raw) - {
+        "required_approvals",
+        "required_checks",
+        "require_ready_for_review",
+        "min_reviewer_permission",
+        "require_branch_protection_evidence",
+    }
+    if unknown:
+        raise ConfigError(f"approval_policy has unknown keys {sorted(unknown)} (typo?)")
+    return ApprovalPolicyConfig(approvals, tuple(checks), ready, permission, protection)
+
+
+def _is_int(value: Any) -> bool:
+    """``True``/``False`` are ints in Python; never accept them as numbers here."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _env_name(value: str, where: str) -> None:
+    if not _ENV_NAME_RE.match(value):
+        raise ConfigError(f"{where} must be an environment variable NAME, not a value")
+
+
+def validate_registry_url(url: str) -> str:
+    """Return the lower-cased hostname of a safe registry URL, or raise ConfigError.
+
+    * parsed with ``urllib.parse``, never prefix-matched (``http://localhost.evil.example``
+      is not loopback);
+    * ``https`` for any host, plain ``http`` only when the hostname is exactly loopback;
+    * no embedded credentials, query or fragment.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    try:
+        host = (parsed.hostname or "").lower()
+        _ = parsed.port  # raises on malformed ports
+    except ValueError as exc:
+        raise ConfigError(f"registry.url is malformed: {exc}") from exc
+    if parsed.scheme not in ("https", "http") or not host:
+        raise ConfigError("registry.url must be an absolute http(s) URL with a hostname")
+    if parsed.username is not None or parsed.password is not None:
+        raise ConfigError("registry.url must not embed credentials; use username_env/password_env")
+    if parsed.query or parsed.fragment:
+        raise ConfigError("registry.url must not contain a query or fragment")
+    if parsed.scheme == "http" and host not in LOOPBACK_HOSTS:
+        raise ConfigError("registry.url must use https (plain http only for a loopback test index)")
+    return host

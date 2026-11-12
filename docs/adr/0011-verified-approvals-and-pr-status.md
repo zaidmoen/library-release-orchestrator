@@ -28,8 +28,21 @@ refs (ADR-0010) show that a PR exists, but not its state, reviews or checks.
   `APPROVAL_NOT_VERIFIED` unless the decision is approved. The full evidence (PR snapshot,
   reviews, checks, decision) is stored in the run state. `--approve` is still required as
   well: the operator's consent and the reviewers' approval are separate gates.
-* A registry marked `production: true` without an `approval_policy` refuses publication
-  (`PRODUCTION_PUBLISH_UNAUTHORIZED`).
+* **Fail closed on anything unverifiable** (security review, 2026-11-10):
+  * An approval counts only if the reviewer's repository permission is verified at
+    `min_reviewer_permission` (default `write`) or above. If the permission API can't be
+    read (anonymous or under-scoped token), the approval doesn't count.
+  * A later `DISMISSED` review revokes that reviewer's approval.
+  * Required checks are satisfied by the latest check run **or** a legacy commit status;
+    `pending`, `error`, `failure` and missing all block.
+  * Branch protection is read when the token allows. Its required checks are **added** to
+    the policy's. If it can't be read, the evidence says `unverified (<status>)`, never
+    "unprotected". With `require_branch_protection_evidence: true` that blocks.
+* **Production is a separate authorization.** A registry with `production: true` is
+  always refused (`PRODUCTION_PUBLISH_UNAUTHORIZED`), *even with* a verified GitHub approval.
+  Review approval authorizes code, not production publication, and no production
+  authorization source (for example a GitHub deployment environment with required
+  reviewers) is implemented yet.
 
 ## Authorization boundaries
 
@@ -37,8 +50,8 @@ refs (ADR-0010) show that a PR exists, but not its state, reviews or checks.
 |---|---|
 | plan, analyze, verify, validate, reconcile, status | nothing (read-only) |
 | prepare, push, pr, update-consumers | operator `--approve` |
-| publish to a test or local registry | `--approve` (+ verified approval when a policy is set) |
-| publish to a production registry | `--approve` **and** verified approval policy |
+| publish to a loopback/test registry | `--approve` (+ verified approval when a policy is set) |
+| publish to a production registry | **refused**: no production authorization source exists |
 | promote / rollback environments | `--approve` + quorum (self-declared names: known gap) |
 | merge, deploy | never performed by the engine |
 

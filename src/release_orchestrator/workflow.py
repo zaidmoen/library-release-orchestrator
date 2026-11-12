@@ -616,6 +616,8 @@ class Orchestrator:
                     policy.required_approvals,
                     policy.required_checks,
                     policy.require_ready_for_review,
+                    policy.min_reviewer_permission,
+                    policy.require_branch_protection_evidence,
                 ),
                 expected_head=str(report.head),
             )
@@ -640,14 +642,30 @@ class Orchestrator:
         return int(record["number"])
 
     def _authorize_publication(self, run: RunState, plan: ReleasePlan) -> None:
-        """Publishing needs more than the operator's --approve (ADR-0011).
+        """Publishing needs more than the operator's --approve (ADR-0011). Fail closed.
 
-        * ``approval_policy`` configured: a GitHub review approval on the current release
-          commit, plus required checks, verified live. A draft or stale approval is not
-          enough.
-        * production registry without a policy: refused. Nobody may publish to production
-          on the operator's word alone.
+        * A **production** registry is always refused. A GitHub review approves *code*; it
+          is not authorization to publish to production. No separate production
+          authorization source (e.g. a GitHub deployment environment with required
+          reviewers) is implemented, so the only safe answer is no.
+        * ``approval_policy`` configured: a GitHub review approval on the exact release
+          commit, by a reviewer with verified permission, plus green required checks.
+          Anything unverifiable counts as not approved.
         """
+        if self.config.registry_production:
+            self._block(
+                run,
+                plan,
+                BlockedError(
+                    "Publishing to a production registry is not authorized: GitHub review "
+                    "approval is not production authorization, and no production "
+                    "authorization source is configured",
+                    reason="PRODUCTION_PUBLISH_UNAUTHORIZED",
+                    details={
+                        "registry": self.config.registry_url or str(self.config.registry_path)
+                    },
+                ),
+            )
         if self.config.approval_policy is not None:
             status = self.pr_status(plan, run)
             decision = status["decision"]
@@ -661,16 +679,6 @@ class Orchestrator:
                         details=decision,
                     ),
                 )
-        elif self.config.registry_production:
-            self._block(
-                run,
-                plan,
-                BlockedError(
-                    "Publishing to a production registry requires approval_policy (verified "
-                    "GitHub approvals); --approve alone is not sufficient",
-                    reason="PRODUCTION_PUBLISH_UNAUTHORIZED",
-                ),
-            )
 
     # ------------------------------------------------------------------ helpers
     def _artifact(self, head: str, version: SemVer) -> tuple[str, bytes]:

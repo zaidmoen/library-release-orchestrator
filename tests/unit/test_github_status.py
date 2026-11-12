@@ -20,7 +20,19 @@ HEAD = "a" * 40
 OLD = "b" * 40
 
 
-def evidence(*, reviews=(), checks=(), draft=False, state="open", merged=False, head=HEAD):  # type: ignore[no-untyped-def]
+def evidence(  # type: ignore[no-untyped-def]
+    *,
+    reviews=(),
+    checks=(),
+    draft=False,
+    state="open",
+    merged=False,
+    head=HEAD,
+    permissions=None,
+    statuses=None,
+    protection=None,
+    protection_note="unverified (404)",
+):
     pull = PullStatus(
         "o/r",
         7,
@@ -33,7 +45,17 @@ def evidence(*, reviews=(), checks=(), draft=False, state="open", merged=False, 
         "author",
         "https://github.com/o/r/pull/7",
     )
-    return PullEvidence(pull, list(reviews), list(checks), "2026-11-10T00:00:00Z")
+    perms = {r.user: "write" for r in reviews} if permissions is None else permissions
+    return PullEvidence(
+        pull,
+        list(reviews),
+        list(checks),
+        "2026-11-10T00:00:00Z",
+        statuses or {},
+        perms,
+        protection,
+        protection_note,
+    )
 
 
 POLICY = ApprovalPolicy(required_approvals=1, required_checks=("ci",))
@@ -216,10 +238,112 @@ def test_anonymous_reader_sends_no_authorization_header(monkeypatch):
     with pytest.raises(GitHubAccessError) as exc:
         GitHubReader(transport=transport).pull("o/r", 1)
     assert "Authorization" not in calls[0][2]
-    assert "private repos need one" in exc.value.message
+    assert "no GITHUB_TOKEN set" in exc.value.message
 
 
 @pytest.mark.parametrize("bad", ["o", "o/r/x", "/r"])
 def test_repository_names_are_validated(bad):
     with pytest.raises(ValueError):
         GitHubReader(transport=lambda *a: (200, {})).pull(bad, 1)
+
+
+# --------------------------------------------------------------------------- fail-closed rules
+@pytest.mark.parametrize("level", ["read", "triage", "none", "unverified (403)"])
+def test_approval_without_verified_write_permission_does_not_count(level):
+    decision = evaluate_approval(
+        evidence(reviews=[approve("rev")], checks=GREEN, permissions={"rev": level}),
+        POLICY,
+        expected_head=HEAD,
+    )
+    assert not decision.approved and decision.unauthorized_approvals == [f"rev ({level})"]
+
+
+def test_dismissed_review_revokes_earlier_approval():
+    decision = evaluate_approval(
+        evidence(
+            reviews=[approve("rev", at="t1"), Review("rev", "DISMISSED", HEAD, "t2")], checks=GREEN
+        ),
+        POLICY,
+        expected_head=HEAD,
+    )
+    assert not decision.approved and decision.approvers == []
+
+
+def test_commit_status_can_satisfy_a_required_check():
+    ok = evaluate_approval(
+        evidence(reviews=[approve("rev")], statuses={"ci": "success"}), POLICY, expected_head=HEAD
+    )
+    pending = evaluate_approval(
+        evidence(reviews=[approve("rev")], statuses={"ci": "pending"}), POLICY, expected_head=HEAD
+    )
+    assert ok.approved and not pending.approved and pending.checks == {"ci": "pending"}
+
+
+def test_branch_protection_checks_are_added_when_readable():
+    decision = evaluate_approval(
+        evidence(
+            reviews=[approve("rev")],
+            checks=GREEN,
+            protection=["ci", "security-scan"],
+            protection_note="read",
+        ),
+        POLICY,
+        expected_head=HEAD,
+    )
+    assert not decision.approved and decision.checks["security-scan"] == "missing"
+
+
+def test_unreadable_branch_protection_is_never_treated_as_unprotected():
+    strict = ApprovalPolicy(1, ("ci",), require_branch_protection_evidence=True)
+    decision = evaluate_approval(
+        evidence(reviews=[approve("rev")], checks=GREEN), strict, expected_head=HEAD
+    )
+    assert not decision.approved
+    assert any("branch protection could not be read" in r for r in decision.reasons)
+    # Without the requirement the configured policy still applies in full (no inference).
+    assert evaluate_approval(
+        evidence(reviews=[approve("rev")], checks=GREEN), POLICY, expected_head=HEAD
+    ).approved
+
+
+def test_reader_records_unverifiable_permission_and_protection():
+    pr = {
+        "number": 1,
+        "state": "open",
+        "draft": False,
+        "merged": False,
+        "head": {"ref": "h", "sha": HEAD},
+        "base": {"ref": "main"},
+        "user": {"login": "a"},
+        "html_url": "https://github.com/o/r/pull/1",
+    }
+    routes = {
+        "/pulls/1": (200, pr),
+        "/pulls/1/reviews": (
+            200,
+            [
+                {
+                    "user": {"login": "rev"},
+                    "state": "APPROVED",
+                    "commit_id": HEAD,
+                    "submitted_at": "t",
+                }
+            ],
+        ),
+        "/check-runs": (200, {"check_runs": []}),
+        "/status": (200, {"statuses": []}),
+        "/permission": (401, {"message": "Requires authentication"}),
+        "/protection": (403, {"message": "Resource not accessible"}),
+    }
+
+    def transport(method, url, headers, body):  # type: ignore[no-untyped-def]
+        path = url.split("?")[0]
+        for suffix, response in routes.items():
+            if path.endswith(suffix):
+                return response
+        return 404, {}
+
+    ev = GitHubReader(transport=transport, sleep=lambda _s: None).evidence("o/r", 1)
+    assert ev.permissions == {"rev": "unverified (401)"}
+    assert ev.protection_checks is None and ev.protection_note == "unverified (403)"
+    assert not evaluate_approval(ev, ApprovalPolicy(1, ()), expected_head=HEAD).approved

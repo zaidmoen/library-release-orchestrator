@@ -35,8 +35,18 @@ WRITE_COMMANDS = {"prepare", "pr", "publish", "update-consumers", "push", "promo
 class _JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
         data = {"level": record.levelname, "logger": record.name, "message": record.getMessage()}
-        if hasattr(record, "argv"):
-            data["argv"] = record.argv
+        for key in (
+            "argv",
+            "plan_id",
+            "from_state",
+            "to_state",
+            "note",
+            "version",
+            "attempt",
+            "delay",
+        ):
+            if hasattr(record, key):
+                data[key] = getattr(record, key)
         return json.dumps(data)
 
 
@@ -113,6 +123,11 @@ def build_parser() -> argparse.ArgumentParser:
     gh.add_argument("--required-approvals", type=int, default=1)
     gh.add_argument("--required-check", action="append", default=[])
     gh.add_argument("--allow-draft", action="store_true")
+    gh.add_argument(
+        "--min-reviewer-permission",
+        default="write",
+        choices=["read", "triage", "write", "maintain", "admin"],
+    )
 
     rec = sub.add_parser("reconcile-prs", help="match PR requests with PRs that exist on GitHub")
     rec.add_argument("--plan", type=Path, required=True)
@@ -158,7 +173,10 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         decision = evaluate_approval(
             evidence,
             ApprovalPolicy(
-                args.required_approvals, tuple(args.required_check), not args.allow_draft
+                args.required_approvals,
+                tuple(args.required_check),
+                not args.allow_draft,
+                args.min_reviewer_permission,
             ),
             expected_head=args.expected_head or evidence.pull.head_sha,
         )

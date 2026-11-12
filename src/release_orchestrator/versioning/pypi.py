@@ -67,6 +67,11 @@ def urllib_http(
         return exc.code, exc.read()
 
 
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme, (parts.hostname or "").lower(), parts.port
+
+
 def normalize(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
@@ -140,6 +145,13 @@ class PypiRegistry:
             filename = urllib.parse.unquote(target.rsplit("/", 1)[-1])
             if not filename.lower().startswith(prefix) or not filename.endswith(".whl"):
                 continue
+            absolute = urllib.parse.urljoin(index_url, target)
+            if _origin(absolute) != _origin(self.url):
+                # Supply-chain guard: never follow a file link off the configured registry.
+                raise IntegrationError(
+                    f"Index links {filename} to a foreign host; refusing",
+                    details={"link": absolute, "registry": self.url},
+                )
             version = from_pep440(filename[len(prefix) :].split("-", 1)[0])
             digest = fragment[len("sha256=") :] if fragment.startswith("sha256=") else ""
             if version is not None:

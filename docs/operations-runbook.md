@@ -31,7 +31,7 @@ release-orchestrator status --plan plan.json
 | `ISSUE_DATA_STALE` / `ISSUE_INACCESSIBLE` | issue snapshot is old or partial | refresh the snapshot, then re-plan |
 | `VALIDATION_FAILED` | tests failed on the release branch | read `output_tail`; fix on trunk; re-plan |
 | `APPROVAL_NOT_VERIFIED` | review/check policy not satisfied | read `details.reasons` (draft, stale approval, failing check); get a review on the **current** head |
-| `PRODUCTION_PUBLISH_UNAUTHORIZED` | production registry without a policy | configure `approval_policy`; never bypass |
+| `PRODUCTION_PUBLISH_UNAUTHORIZED` | the registry is marked `production: true` | expected: no production authorization source is implemented, so production publication is always refused (ADR-0011) |
 | `IMMUTABLE_VERSION` / `VERSION_COLLISION` | the version exists with other content | investigate the other release; re-plan to the next version; never overwrite |
 | `REGISTRY_AUTH_FAILED` / `GITHUB_ACCESS_DENIED` | credentials missing, wrong or too weak | fix the env var or token scope; nothing was written |
 | `INTEGRATION_ERROR` with `retryable: true` | network or server outage after retries | re-run the same command later (steps are idempotent) |

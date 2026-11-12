@@ -233,7 +233,7 @@ def test_full_lab_release_through_the_index(index, tmp_path):
     config.write_text(
         config.read_text().replace(
             "registry:\n  provider: local\n  path: ./registry\n",
-            f"registry:\n  provider: pypi\n  url: {index}\n"
+            f"registry:\n  provider: pypi\n  production: false\n  url: {index}\n"
             "  username_env: LRO_TEST_REGISTRY_USER\n  password_env: LRO_TEST_REGISTRY_PASSWORD\n",
         )
     )
@@ -246,3 +246,19 @@ def test_full_lab_release_through_the_index(index, tmp_path):
     summary = lab.orch.update_consumers(plan, approve=True, dry_run=False)
     [update] = summary["updated"]
     assert update["consumer"] == "payment-service" and update["validation"]["status"] == "PASSED"
+
+
+def test_index_links_to_a_foreign_host_are_refused():
+    page = (
+        b'<a href="https://evil.example/zaidlibrary-1.1.0-py3-none-any.whl#sha256=00">'
+        b"zaidlibrary-1.1.0-py3-none-any.whl</a>"
+    )
+
+    def http(method, url, headers, body):  # type: ignore[no-untyped-def]
+        return 200, page
+
+    with pytest.raises(IntegrationError) as exc:
+        PypiRegistry(
+            "https://pkgs.internal.example", username_env="U", password_env="P", http=http
+        ).list_versions("zaidlibrary")
+    assert "foreign host" in exc.value.message
