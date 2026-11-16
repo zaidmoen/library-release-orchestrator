@@ -103,3 +103,23 @@ both code analysis and the tracker.
 * Environment promotion is a ledger record; branches named in config aren't moved by
   the orchestrator.
 * Cross-repository execution isn't atomic. Steps are idempotent and resumable instead.
+
+## Acceptance audit through the real Skill (2026-11-16)
+
+`/library-release` was run for all three modes, with Q1/Q2/Q3 answered by the engineer
+through Claude's interactive single- and multi-select questions. That run found gaps the
+CLI tests couldn't, all fixed with regression tests:
+
+| Gap | Fix | Test |
+|---|---|---|
+| The Skill's `lro.py` imported an **installed, older checkout** of the engine (editable install elsewhere), so the release modes were missing | `lro.py` always runs the engine from its own repository and refuses any other; the intake output reports the engine path | `test_skill_script_ignores_a_foreign_installed_engine` (the pre-fix script fails it) |
+| SKILL.md still said "Promote the RC to final: not supported" | replaced with the release / reorder-releases modes | — |
+| Mode-vs-workflow precedence unclear | explicit precedence rule in SKILL.md | — |
+| Preview BLOCKED without listing the environment reason | BLOCKED environments and services are added to `blockers` | `test_blocked_environment_is_listed_as_a_blocker` |
+| Environment → branch mapping hidden when Q3 was skipped | `environment_mapping` always present and rendered | `test_preview_always_shows_environment_branch_mapping_and_steps` |
+| Pending RCs shown by tag only; multi-step versions hidden | candidate table (tickets, contains, own) and `release_steps` table | same |
+| Reordering finalized RCs said "not pending" | `ALREADY_FINALIZED` with the stable tag | `test_reordering_finalized_candidates_explains_why` |
+
+Live check: discovery against fresh clones of the GitHub sandbox repos found stable
+`v1.1.0` (`2c8e859e47`), rc.22/rc.23 finalized, remote tags verified, 0 PR refs and no
+uncertainties.

@@ -16,6 +16,11 @@ first when the user gave one).
 
 ## Release modes (interactive)
 
+**Precedence:** if a release mode is requested (`intake.mode_args` isn't empty, or the
+user asks to prepare an RC, release or finalize a candidate, or reorder candidates),
+follow this section. The *Workflow* below covers a single-ticket request without a mode,
+and running the commands a preview lists.
+
 Pick the mode from the request (or `intake.release_mode`):
 **release-candidate** ("prepare an RC with FIN-204"), **release** ("release the
 candidate"), **reorder-releases** ("release rc.23 before rc.22"). All three follow these
@@ -32,16 +37,21 @@ steps. The engine computes everything; you only present and ask.
    "(blocked)" and give their evidence. Never present a blocked option as safe, and never
    invent a dependency that isn't in `evidence`. If only `stop` is valid, explain why and
    stop.
-2. **Q2, where to apply (multi select).** Offer the discovered services (mark which are
-   *affected* for the chosen option; the preview tells you) plus "All". Selecting fewer
-   never removes them from the analysis.
+2. **Q2, where to apply (multi select).** First run the read-only
+   `LRO release-mode preview <mode_args> --choice <id> --services all` and read
+   `affected_services` and each service's current pin. Then ask, offering "All" plus every
+   discovered service, marked *AFFECTED* or *not affected*. Selecting fewer never removes
+   services from the analysis.
 3. **Q3, environments (optional multi select).** Offer the configured environments with
    their branches. If the user skips, pass nothing: the documented default is **no
    environment operation**, never production.
 4. **Impact preview.** `LRO release-mode preview <mode_args> --choice <id> --services a,b
-   [--environments prep,stage] --out preview.json`. Show `preview.md` (tables, blockers,
-   warnings, commands). Statuses: READY / BLOCKED / NEEDS VALIDATION / NOT SELECTED.
-   Say plainly that **nothing was executed**.
+   [--environments prep,stage] --out preview.json`. Show `preview.md` in full. It always
+   contains the latest stable release, pending candidates with their tickets, the step
+   table (candidate → version), affected services with current → target versions, and every
+   environment with its branch, selected or not. Then show blockers, warnings and
+   commands. Statuses: READY / BLOCKED / NEEDS VALIDATION / NOT SELECTED. Say plainly that
+   **nothing was executed**.
 5. **Approval gate.** Before running any listed command, run
    `LRO release-mode check-preview --preview preview.json`. `STALE_PREVIEW` means you must
    regenerate the preview. Then run the commands in order, asking for an explicit "yes"
@@ -110,7 +120,8 @@ steps. The engine computes everything; you only present and ask.
 | "Which services need updates?" | `LRO plan …` | `consumers[].action` |
 | "Why did publish fail?" / "Recovery plan" | `LRO status --plan …` | `steps.last_error`; map `reason` with docs/operations-runbook.md |
 | "Show the audit trail" | `LRO status --plan …` and `<state_dir>/reports/<plan_id>.md` | history, provenance, evidence |
-| "Promote the RC to final" | **not supported yet**. Say so; never improvise | — |
+| "Release / finalize the RC" | Release modes: `--mode release` (lineage-checked) | `options[]`, preview |
+| "Release rc.23 before rc.22" | Release modes: `--mode reorder-releases --order …` | `options[]`, `release_steps` |
 
 Publishing with an `approval_policy` requires `pr-status` → `decision.approved: true`. A
 draft PR, a stale approval or a non-green required check means: report and stop.
