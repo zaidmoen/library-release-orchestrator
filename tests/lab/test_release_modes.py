@@ -405,3 +405,59 @@ def test_fin_204_and_fin_211_regressions_still_hold(shared):
         "valid"
     ]
     subprocess.run(["git", "-C", str(shared.lib), "status"], check=True, capture_output=True)
+
+
+# --------------------------------------------------------------------------- acceptance gaps
+def test_preview_always_shows_environment_branch_mapping_and_steps(shared):
+    from release_orchestrator.modes import render_preview
+
+    preview = engine(shared).preview(
+        "reorder-releases",
+        order=["v1.1.0-rc.23", "v1.1.0-rc.22"],
+        choice="dependency-order",
+        services=["all"],
+        environments=None,
+    )
+    mapping = {
+        (e["environment"], e["branch"], e["selected"]) for e in preview["environment_mapping"]
+    }
+    assert mapping == {
+        ("prep", "prep", False),
+        ("stage", "stage", False),
+        ("master", "master", False),
+    }
+    assert [(s["candidate"], s["version"]) for s in preview["release_steps"]] == [
+        ("v1.1.0-rc.22", "1.1.0"),
+        ("v1.1.0-rc.23", "1.2.0"),
+    ]
+    md = render_preview(preview)
+    for expected in (
+        "## Environments and branches",
+        "| prep | prep |",
+        "| master | master |",
+        "| v1.1.0-rc.22 | FIN-198, FIN-204 |",
+        "| 2 | v1.1.0-rc.23 | FIN-211 | 1.2.0",
+        "Latest stable release: **1.0.0**",
+        "Affected microservices:",
+        "Nothing has been executed",
+    ):
+        assert expected in md, expected
+
+
+def test_blocked_environment_is_listed_as_a_blocker(shared):
+    preview = engine(shared).preview(
+        "release-candidate",
+        tickets=["FIN-211"],
+        choice="with-prerequisites",
+        services=["all"],
+        environments=["prep", "stage", "master"],
+    )
+    assert preview["readiness"] == BLOCKED
+    assert "environment master: master doesn't accept pre-releases" in preview["blockers"]
+
+
+def test_reordering_finalized_candidates_explains_why(lab):
+    lab.git(LIBRARY_DIR, "tag", "v1.1.0", "v1.1.0-rc.23")
+    with pytest.raises(BlockedError) as exc:
+        engine(lab).options("reorder-releases", order=["v1.1.0-rc.23", "v1.1.0-rc.22"])
+    assert exc.value.reason == "ALREADY_FINALIZED" and "v1.1.0" in exc.value.message

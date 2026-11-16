@@ -415,6 +415,19 @@ class ModeEngine:
         by_version = {c.version: c.tag for c in cands.values()}
         order = [by_version.get(o, o) for o in order]
         unknown = [o for o in order if o not in cands]
+        finalized = self.discover()["finalized_candidates"]
+        done = [
+            o
+            for o in unknown
+            if o in finalized or f"{self.config.library.tag_prefix}{o}" in finalized
+        ]
+        if done:
+            raise BlockedError(
+                f"{done} already have a final release, so they can't be reordered; "
+                f"latest stable is {self.discover()['latest_stable']['tag']}",
+                reason="ALREADY_FINALIZED",
+                details={"finalized": finalized, "pending": sorted(cands)},
+            )
         if unknown:
             raise NotFoundError(
                 f"Not pending candidates: {unknown}", details={"pending": sorted(cands)}
@@ -655,6 +668,14 @@ class ModeEngine:
                 "No environment selected: the safe default is NO environment "
                 "operation (prep/stage/master untouched)."
             )
+        for env in env_rows:
+            if env["status"] == BLOCKED:
+                blockers.append(f"environment {env['environment']}: {env['notes']}")
+        for row in rows:
+            if row["selected"] and row["status"] == BLOCKED:
+                message = f"{row['service']}: {row.get('notes', 'blocked')}"
+                if message not in blockers:
+                    blockers.append(message)
         statuses = [r["status"] for r in rows if r["selected"]] + [e["status"] for e in env_rows]
         readiness = (
             BLOCKED
@@ -683,6 +704,28 @@ class ModeEngine:
             "affected_services": [r["service"] for r in rows[1:] if r["affected"]],
             "services": rows,
             "environments": env_rows,
+            "environment_mapping": [
+                {
+                    "environment": e["name"],
+                    "branch": e["branch"] or "not configured",
+                    "current_version": e["current"],
+                    "selected": e["name"] in selected_envs,
+                    "allow_prerelease": e["allow_prerelease"],
+                    "required_approvals": e["required_approvals"],
+                }
+                for e in disc["environments"]
+            ],
+            "release_steps": [
+                {
+                    "step": n,
+                    "candidate": s["candidate"],
+                    "tickets": s["keys"],
+                    "version": s["version"],
+                    "status": s["status"],
+                    "plan_id": s["plan_id"],
+                }
+                for n, s in enumerate(steps, 1)
+            ],
             "operations": operations,
             "commands": commands,
             "approval": approval,
@@ -1121,15 +1164,48 @@ def render_preview(preview: dict[str, Any]) -> str:
     lines = [
         f"# Impact preview: {preview['mode']} ({preview['readiness']})",
         "",
+        "Nothing has been executed. Each command marked `--approve` needs an explicit yes.",
+        "",
         f"* Choice: **{preview['choice']['label']}** (`{preview['choice']['id']}`)",
-        f"* Latest stable: {stable['version']} (`{stable['tag']}`)",
-        "* Pending candidates: "
-        + (", ".join(c["tag"] for c in preview["pending_candidates"]) or "none"),
+        f"* Latest stable release: **{stable['version']}** "
+        f"(`{stable['tag']}`, {stable['sha'][:10]})",
         f"* Proposed version: **{preview['proposed_version']}**",
-        f"* Order: existing {preview['execution_order']['existing']} -> proposed "
-        f"{preview['execution_order']['proposed']}",
-        f"* Selected services: {', '.join(preview['selected_services']) or 'none'}; affected: "
-        f"{', '.join(preview['affected_services']) or 'none'}",
+        f"* Affected microservices: {', '.join(preview['affected_services']) or 'none'}",
+        f"* Selected microservices: {', '.join(preview['selected_services']) or 'none'}",
+        "",
+        "## Pending release candidates",
+        "",
+    ]
+    if preview["pending_candidates"]:
+        lines += [
+            "| Candidate | Tickets | Contains | Own tickets | Published |",
+            "|---|---|---|---|---|",
+        ]
+        lines += [
+            f"| {c['tag']} | {', '.join(c['keys'])} | {', '.join(c['contains']) or '-'} | "
+            f"{', '.join(c['own_keys'])} | {c['published']} |"
+            for c in preview["pending_candidates"]
+        ]
+    else:
+        lines.append("None pending.")
+    order = preview["execution_order"]
+    lines += [
+        "",
+        "## Execution order",
+        "",
+        f"Existing: {' -> '.join(order['existing']) or 'none'}",
+        "",
+        "| Step | Candidate | Tickets | Version | Status |",
+        "|---|---|---|---|---|",
+    ]
+    lines += [
+        f"| {s['step']} | {s['candidate'] or '-'} | {', '.join(s['tickets']) or '-'} | "
+        f"{s['version']} | {s['status']} |"
+        for s in preview["release_steps"]
+    ]
+    lines += [
+        "",
+        "## Services",
         "",
         "| Service | Current Version | Target Version | Environment | Status | Notes |",
         "|---|---|---|---|---|---|",
@@ -1140,17 +1216,22 @@ def render_preview(preview: dict[str, Any]) -> str:
             f"{row['target_version'] or '-'} | {', '.join(row['environments'])} | "
             f"{row['status']} | {row.get('notes', '')} |"
         )
-    if preview["environments"]:
-        lines += [
-            "",
-            "| Environment | Branch | Current | Target | Status | Notes |",
-            "|---|---|---|---|---|---|",
-        ]
-        lines += [
-            f"| {e['environment']} | {e['branch']} | {e['current_version'] or '-'} | "
-            f"{e['target_version']} | {e['status']} | {e['notes']} |"
-            for e in preview["environments"]
-        ]
+    lines += [
+        "",
+        "## Environments and branches",
+        "",
+        "| Environment | Branch | Current | Selected | Target | Status | Notes |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    selected = {e["environment"]: e for e in preview["environments"]}
+    for env in preview["environment_mapping"]:
+        row = selected.get(env["environment"])
+        lines.append(
+            f"| {env['environment']} | {env['branch']} | {env['current_version'] or '-'} | "
+            f"{'yes' if row else 'no'} | {row['target_version'] if row else '-'} | "
+            f"{row['status'] if row else NOT_SELECTED} | "
+            f"{row['notes'] if row else 'no operation (not selected)'} |"
+        )
     deps = preview["dependencies"]
     lines += ["", "## Dependencies", ""]
     lines += [f"* confirmed: {d['from']} -> {d['to']} ({d['evidence']})" for d in deps["confirmed"]]
