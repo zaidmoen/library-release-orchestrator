@@ -76,3 +76,28 @@ def test_release_mode_arguments_are_parsed_and_validated():
     assert rc["mode_args"] == ["--mode", "release-candidate", "--ticket", "FIN-211"]
     with pytest.raises(InvalidInputError):
         parse_skill_arguments("--mode deploy-everything")
+
+
+def test_skill_script_ignores_a_foreign_installed_engine(tmp_path):
+    """Acceptance finding: an editable install of another, older checkout was imported
+    instead of this repository's engine. The Skill must always run its own engine."""
+    import os
+
+    stale = tmp_path / "stale" / "release_orchestrator"
+    stale.mkdir(parents=True)
+    (stale / "__init__.py").write_text('__version__ = "0.0.0-stale"\n')
+    (stale / "cli.py").write_text("raise ImportError('stale engine must never be imported')\n")
+    env = {**os.environ, "PYTHONPATH": str(stale.parent)}
+    proc = subprocess.run(
+        [sys.executable, str(SCRIPT), "intake", "--mode", "reorder-releases", "--order", "a,b"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env=env,
+    )
+    assert proc.returncode == 0, proc.stderr
+    out = json.loads(proc.stdout)
+    assert out["intake"]["mode_args"] == ["--mode", "reorder-releases", "--order", "a,b"]
+    expected = (Path(__file__).resolve().parents[2] / "src" / "release_orchestrator").resolve()
+    assert Path(out["engine"]["path"]).resolve() == expected
+    assert out["engine"]["version"] != "0.0.0-stale"
