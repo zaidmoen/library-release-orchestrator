@@ -60,3 +60,19 @@ def test_skill_script_drives_engine(tmp_path):
     assert code == 0 and out["result"]["status"] == "PLAN_READY"
     code, out = _lro("prepare", "--plan", "release-plan.json", cwd=root)
     assert code == 4 and out["error"]["code"] == "APPROVAL_REQUIRED"
+
+
+def test_release_mode_arguments_are_parsed_and_validated():
+    intake = parse_skill_arguments(
+        "--mode reorder-releases --order v1.1.0-rc.23,v1.1.0-rc.22"
+    ).to_dict()
+    assert intake["mode_args"] == [
+        "--mode",
+        "reorder-releases",
+        "--order",
+        "v1.1.0-rc.23,v1.1.0-rc.22",
+    ]
+    rc = parse_skill_arguments("FIN-211 --mode release-candidate").to_dict()
+    assert rc["mode_args"] == ["--mode", "release-candidate", "--ticket", "FIN-211"]
+    with pytest.raises(InvalidInputError):
+        parse_skill_arguments("--mode deploy-everything")
