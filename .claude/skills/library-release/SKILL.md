@@ -31,9 +31,13 @@ steps. The engine computes everything; you only present and ask.
    services and their pins, environments and branches. Read `uncertainties` aloud and
    never fill them in.
 1. **Q1, dependency check (single choice).** `LRO release-mode options <intake.mode_args>`.
-   Ask with `AskUserQuestion` (single select): one option per `options[]` entry, the
-   `recommended` one first with "(Recommended)", the label from `label`, and the
-   description from `description` plus the first evidence lines. Mark blocked options
+   Ask with `AskUserQuestion` (single select). **Start the question text with
+   `releases_text`** (latest stable, every pending RC with its tickets and what it
+   contains, finalized RCs), so the releases are visible in Q1 itself. One option per
+   `options[]` entry, the `recommended` one first with "(Recommended)", the label from
+   `label`, and the description starting with the release(s) it produces from
+   `produces[]` (for example `rc.22 -> 1.1.0, then rc.23 -> 1.2.0`), then `description`
+   and the first evidence lines. Mark blocked options
    "(blocked)" and give their evidence. Never present a blocked option as safe, and never
    invent a dependency that isn't in `evidence`. If only `stop` is valid, explain why and
    stop.

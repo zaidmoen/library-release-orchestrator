@@ -101,7 +101,52 @@ class Option:
     steps: list[Step] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
-        return {**asdict(self), "steps": [asdict(s) for s in self.steps]}
+        produces = [
+            {
+                "step": n,
+                "candidate": s.candidate,
+                "tickets": s.keys,
+                "version": s.version,
+                "status": s.status,
+            }
+            for n, s in enumerate(self.steps, 1)
+        ]
+        return {**asdict(self), "steps": [asdict(s) for s in self.steps], "produces": produces}
+
+
+def _releases_summary(disc: dict[str, Any]) -> dict[str, Any]:
+    """The releases Q1 is about: latest stable, pending RCs (with contents), finalized RCs."""
+    return {
+        "latest_stable": disc["latest_stable"],
+        "pending_candidates": [
+            {
+                "tag": c["tag"],
+                "version": c["version"],
+                "sha": c["sha"],
+                "tickets": c["keys"],
+                "own_tickets": c["own_keys"],
+                "contains": c["contains"],
+                "published": c["published"],
+            }
+            for c in disc["pending_candidates"]
+        ],
+        "finalized_candidates": disc["finalized_candidates"],
+    }
+
+
+def _releases_text(releases: dict[str, Any]) -> str:
+    stable = releases["latest_stable"]
+    parts = [f"Latest stable: {stable['tag']}" if stable else "No stable release"]
+    pending = [
+        f"{c['tag']} ({', '.join(c['tickets']) or 'no tickets'}"
+        + (f"; contains {', '.join(c['contains'])}" if c["contains"] else "")
+        + ")"
+        for c in releases["pending_candidates"]
+    ]
+    parts.append(f"Pending RCs: {'; '.join(pending)}" if pending else "Pending RCs: none")
+    if releases["finalized_candidates"]:
+        parts.append(f"Finalized RCs: {', '.join(releases['finalized_candidates'])}")
+    return ". ".join(parts) + "."
 
 
 class ModeEngine:
@@ -264,9 +309,12 @@ class ModeEngine:
         options.append(Option(STOP, "Stop", "Do nothing; resolve prerequisites first.", True))
         valid = [o for o in options if o.valid and o.id != STOP]
         recommended = next((o for o in valid if o.recommended), None)
+        releases = _releases_summary(disc)
         return {
             "mode": mode,
             "question": "Dependency check: how should pending changes be handled?",
+            "releases": releases,
+            "releases_text": _releases_text(releases),
             "single_choice": True,
             "options": [o.to_dict() for o in options],
             "recommended": recommended.id if recommended else STOP,

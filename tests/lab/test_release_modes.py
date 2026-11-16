@@ -461,3 +461,38 @@ def test_reordering_finalized_candidates_explains_why(lab):
     with pytest.raises(BlockedError) as exc:
         engine(lab).options("reorder-releases", order=["v1.1.0-rc.23", "v1.1.0-rc.22"])
     assert exc.value.reason == "ALREADY_FINALIZED" and "v1.1.0" in exc.value.message
+
+
+def test_q1_lists_the_releases_and_what_each_option_produces(shared):
+    """Engineer feedback: Q1 must show the releases themselves (stable, pending RCs and
+    their contents) and the release(s) each option would produce, in every mode."""
+    eng = engine(shared)
+    for args in (
+        {"mode": "release-candidate", "tickets": ["FIN-211"]},
+        {"mode": "release"},
+        {"mode": "reorder-releases", "order": ["v1.1.0-rc.23", "v1.1.0-rc.22"]},
+    ):
+        result = eng.options(**args)
+        rel = result["releases"]
+        assert rel["latest_stable"]["tag"] == "v1.0.0"
+        pending = {c["tag"]: c for c in rel["pending_candidates"]}
+        assert pending["v1.1.0-rc.22"]["tickets"] == ["FIN-198", "FIN-204"]
+        assert pending["v1.1.0-rc.23"]["own_tickets"] == ["FIN-211"]
+        assert pending["v1.1.0-rc.23"]["contains"] == ["v1.1.0-rc.22"]
+        text = result["releases_text"]
+        assert "Latest stable: v1.0.0" in text
+        assert "v1.1.0-rc.22 (FIN-198, FIN-204)" in text
+        assert "contains v1.1.0-rc.22" in text
+
+    rc = opts(eng.options("release-candidate", tickets=["FIN-211"]))
+    assert [p["version"] for p in rc["with-prerequisites"]["produces"]] == ["1.1.0-rc.24"]
+    release = opts(eng.options("release"))
+    assert release["release:v1.1.0-rc.22"]["produces"][0]["candidate"] == "v1.1.0-rc.22"
+    assert release["release:v1.1.0-rc.22"]["produces"][0]["version"] == "1.1.0"
+    order = opts(eng.options("reorder-releases", order=["v1.1.0-rc.23", "v1.1.0-rc.22"]))
+    assert [(p["candidate"], p["version"]) for p in order["dependency-order"]["produces"]] == [
+        ("v1.1.0-rc.22", "1.1.0"),
+        ("v1.1.0-rc.23", "1.2.0"),
+    ]
+    assert [p["status"] for p in order["requested"]["produces"]] == ["BLOCKED", "SKIPPED"]
+    assert opts(eng.options("release"))["stop"]["produces"] == []
