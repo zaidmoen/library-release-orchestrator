@@ -345,9 +345,9 @@ remote_allowlist:
   - https://github.com/{GITHUB_OWNER}/{PAYMENT_DIR}
   - https://github.com/{GITHUB_OWNER}/{INVOICE_DIR}
 environments:
-  - {{name: prep, required_approvals: 1, allow_prerelease: true}}
-  - {{name: stage, required_approvals: 1, allow_prerelease: true}}
-  - {{name: master, required_approvals: 2, allow_prerelease: false}}
+  - {{name: prep, branch: prep, required_approvals: 1, allow_prerelease: true}}
+  - {{name: stage, branch: stage, required_approvals: 1, allow_prerelease: true}}
+  - {{name: master, branch: master, required_approvals: 2, allow_prerelease: false}}
 validation:
   library:
     - name: unit-tests

@@ -16,13 +16,24 @@ from release_orchestrator.errors import InvalidInputError
 _KEY = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 _SHA = re.compile(r"^[0-9a-f]{7,40}$")
 _BOOL_FLAGS = {"--dry-run": "dry_run", "--plan-only": "plan_only"}
-_VALUE_FLAGS = {"--base": "base", "--source": "source", "--config": "config"}
+_VALUE_FLAGS = {
+    "--base": "base",
+    "--source": "source",
+    "--config": "config",
+    "--mode": "release_mode",
+    "--candidate": "candidate",
+    "--order": "order",
+}
+RELEASE_MODES = ("release-candidate", "release", "reorder-releases")
 
 
 @dataclass
 class SkillIntake:
     mode: str  # ticket | commits | text | ask
     tickets: list[str] = field(default_factory=list)
+    release_mode: str | None = None  # release-candidate | release | reorder-releases
+    candidate: str | None = None
+    order: str | None = None  # comma-separated candidates
     commits: list[str] = field(default_factory=list)
     text: str | None = None
     dry_run: bool = False
@@ -51,7 +62,20 @@ class SkillIntake:
         data = asdict(self)
         data["max_step"] = "plan" if self.plan_only else ("dry-run" if self.dry_run else "full")
         data["plan_args"] = self.cli_request_args()
+        data["mode_args"] = self.mode_args()
         return data
+
+    def mode_args(self) -> list[str]:
+        """Arguments for ``release-mode options|preview`` when a release mode was given."""
+        if not self.release_mode:
+            return []
+        args = ["--mode", self.release_mode]
+        args += [a for t in self.tickets for a in ("--ticket", t)]
+        if self.candidate:
+            args += ["--candidate", self.candidate]
+        if self.order:
+            args += ["--order", self.order]
+        return args
 
 
 def parse_skill_arguments(raw: str) -> SkillIntake:
@@ -79,6 +103,10 @@ def parse_skill_arguments(raw: str) -> SkillIntake:
             words.append(token)
         i += 1
 
+    if intake.release_mode is not None and intake.release_mode not in RELEASE_MODES:
+        raise InvalidInputError(
+            f"Unknown release mode {intake.release_mode!r}", details={"modes": RELEASE_MODES}
+        )
     if not words:
         return intake
     if all(_KEY.match(w) for w in words):

@@ -23,6 +23,7 @@ from release_orchestrator.errors import (
     BlockedError,
     ImmutableVersionError,
     InvalidInputError,
+    NotFoundError,
     OrchestratorError,
 )
 from release_orchestrator.fsutil import temp_dir
@@ -408,8 +409,18 @@ class Orchestrator:
         return result
 
     def update_consumers(
-        self, plan: ReleasePlan, *, approve: bool, dry_run: bool
+        self,
+        plan: ReleasePlan,
+        *,
+        approve: bool,
+        dry_run: bool,
+        only: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
+        """Prepare dependency bumps for targeted consumers.
+
+        ``only`` restricts the *operation* to the services the user selected. It never
+        hides analysis: unselected targets are reported under ``not_updated``.
+        """
         run = self._run(plan)
         version = SemVer.parse(plan.proposed_version)
         artifact = self.s.registry.get(plan.library, version)
@@ -422,7 +433,16 @@ class Orchestrator:
         self._verify_artifact_identity(plan, artifact)
         if not dry_run:
             self._require_approval(run, plan, approve, "update-consumers")
-        targets = [c for c in plan.consumers if c["action"] == "update"]
+        known = {c["name"] for c in plan.consumers}
+        if only is not None and set(only) - known:
+            raise InvalidInputError(
+                f"Unknown consumer(s) {sorted(set(only) - known)}", details={"known": sorted(known)}
+            )
+        targets = [
+            c
+            for c in plan.consumers
+            if c["action"] == "update" and (only is None or c["name"] in only)
+        ]
         results: list[dict[str, Any]] = []
         with temp_dir("lro-artifact-") as library_dir:
             extract_artifact(
@@ -465,6 +485,14 @@ class Orchestrator:
             {"consumer": c["name"], "action": c["action"], "reasons": c.get("reasons", [])}
             for c in plan.consumers
             if c["action"] != "update"
+        ] + [
+            {
+                "consumer": c["name"],
+                "action": "not_selected",
+                "reasons": ["targeted by the plan but not selected for this operation"],
+            }
+            for c in plan.consumers
+            if c["action"] == "update" and only is not None and c["name"] not in only
         ]
         failed = [r["consumer"] for r in results if r["status"] == "validation_failed"]
         summary = {"dry_run": dry_run, "updated": results, "not_updated": skipped, "failed": failed}
@@ -553,6 +581,54 @@ class Orchestrator:
         run.record("recorded-prs", prs)
         self._save(plan, run)
         return recorded
+
+    def verify_lineage(self, plan: ReleasePlan, candidate: str) -> dict[str, Any]:
+        """A final release must be the approved candidate, not a rebuild of other content.
+
+        The release branch (verified against its plan) may differ from the candidate's
+        commit only in the version file. Anything else is ``LINEAGE_MISMATCH``.
+        """
+        run = self._run(plan)
+        tag = (
+            candidate
+            if candidate.startswith(self.config.library.tag_prefix)
+            else (f"{self.config.library.tag_prefix}{candidate}")
+        )
+        candidate_sha = self.s.git.try_rev_parse(f"refs/tags/{tag}")
+        if candidate_sha is None:
+            raise NotFoundError(f"Release candidate tag {tag} does not exist")
+        report = verify_release_branch(self.s.git, plan)
+        if not report.ok or report.head is None:
+            self._block(
+                run,
+                plan,
+                BlockedError(
+                    "Release branch does not match the plan",
+                    reason="MANIFEST_MISMATCH",
+                    details=report.to_dict(),
+                ),
+            )
+        changed = self.s.git.out("diff", "--name-only", candidate_sha, str(report.head))
+        files = [f for f in changed.splitlines() if f]
+        allowed = {self.config.library.version_file} if self.config.library.version_file else set()
+        unexpected = sorted(set(files) - allowed)
+        result = {
+            "ok": not unexpected,
+            "candidate": tag,
+            "candidate_sha": candidate_sha,
+            "release_head": report.head,
+            "differing_files": files,
+            "unexpected_files": unexpected,
+        }
+        run.record("lineage", result)
+        self._save(plan, run)
+        if unexpected:
+            raise BlockedError(
+                f"The release differs from {tag} beyond the version file: {unexpected}",
+                reason="LINEAGE_MISMATCH",
+                details=result,
+            )
+        return result
 
     def reconcile_prs(self, plan: ReleasePlan) -> dict[str, Any]:
         """Compare recorded PR requests with the PRs GitHub actually has (ADR-0010).

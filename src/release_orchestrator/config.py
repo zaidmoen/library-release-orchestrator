@@ -79,6 +79,7 @@ class EnvironmentConfig:
     name: str
     required_approvals: int = 1
     allow_prerelease: bool = True
+    branch: str | None = None  # deployment branch for this env; None = not configured
 
 
 @dataclass(frozen=True)
@@ -384,7 +385,16 @@ def _environments(raw: Any) -> tuple[EnvironmentConfig, ...]:
         allow = item.get("allow_prerelease", True)
         if not isinstance(allow, bool):
             raise ConfigError("allow_prerelease must be a boolean")
-        envs.append(EnvironmentConfig(_name(item, "name"), approvals, allow))
+        branch = item.get("branch")
+        if branch is not None and (
+            not isinstance(branch, str)
+            or not re.fullmatch(r"[A-Za-z0-9._/-]{1,100}", branch)
+            or ".." in branch
+            or branch.startswith(("/", "-"))
+            or branch.endswith("/")
+        ):
+            raise ConfigError(f"environment branch {branch!r} is not a safe branch name")
+        envs.append(EnvironmentConfig(_name(item, "name"), approvals, allow, branch))
     if len({e.name for e in envs}) != len(envs):
         raise ConfigError("environment names must be unique")
     return tuple(envs)

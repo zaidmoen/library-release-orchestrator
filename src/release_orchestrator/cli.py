@@ -19,13 +19,19 @@ from release_orchestrator import __version__
 from release_orchestrator.config import load_config
 from release_orchestrator.demo import SCENARIOS, build_demo
 from release_orchestrator.environments import EnvironmentLedger
-from release_orchestrator.errors import BlockedError, ExitCode, OrchestratorError
+from release_orchestrator.errors import (
+    BlockedError,
+    ExitCode,
+    InvalidInputError,
+    OrchestratorError,
+)
 from release_orchestrator.integrations.github_status import (
     ApprovalPolicy,
     GitHubReader,
     evaluate_approval,
 )
 from release_orchestrator.lab import build_lab
+from release_orchestrator.modes import MODES, ModeEngine, render_preview
 from release_orchestrator.planning.manifest import load_plan
 from release_orchestrator.workflow import Orchestrator, RequestInput, Services, write_plan
 
@@ -113,6 +119,32 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--approve", action="store_true", help="explicit human approval for writes")
         if name in ("prepare", "update-consumers"):
             p.add_argument("--dry-run", action="store_true", help="simulate without any mutation")
+        if name == "update-consumers":
+            p.add_argument(
+                "--consumer",
+                action="append",
+                default=[],
+                help="restrict the operation to these services (repeatable)",
+            )
+
+    lin = sub.add_parser("verify-lineage", help="final release == approved RC except version file")
+    lin.add_argument("--plan", type=Path, required=True)
+    lin.add_argument("--candidate", required=True, help="RC tag or version, e.g. v1.1.0-rc.22")
+
+    rm = sub.add_parser(
+        "release-mode",
+        help="interactive release modes: discovery, Q1 options, impact preview (read-only)",
+    )
+    rm.add_argument("action", choices=["discover", "options", "preview", "check-preview"])
+    rm.add_argument("--mode", choices=list(MODES))
+    rm.add_argument("--ticket", action="append", default=[], help="release-candidate scope")
+    rm.add_argument("--candidate", help="release mode: candidate tag/version to finalize")
+    rm.add_argument("--order", help="reorder mode: comma-separated candidates, first = first")
+    rm.add_argument("--choice", help="Q1 option id (from 'options')")
+    rm.add_argument("--services", help="Q2: comma-separated service names, or 'all' (default all)")
+    rm.add_argument("--environments", help="Q3: comma-separated envs, 'all'; omitted = none")
+    rm.add_argument("--preview", type=Path, help="check-preview: preview JSON file")
+    rm.add_argument("--out", type=Path, help="preview: write JSON (+ .md table) here")
 
     st = sub.add_parser("pr-status", help="authoritative PR state and approval decision (GitHub)")
     st.add_argument("--plan", type=Path, required=True)
@@ -188,6 +220,9 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     config = load_config(args.config)
     orch = Orchestrator(Services.from_config(config))
 
+    if args.command == "release-mode":
+        return _release_mode(orch, args)
+
     if args.command in ("env-status", "promote", "rollback-plan", "rollback"):
         ledger = EnvironmentLedger(config, orch.s.registry)
         if args.command == "env-status":
@@ -258,13 +293,20 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     if args.command == "publish":
         return ExitCode.OK, orch.publish(plan, approve=args.approve)
     if args.command == "update-consumers":
-        return ExitCode.OK, orch.update_consumers(plan, approve=args.approve, dry_run=args.dry_run)
+        return ExitCode.OK, orch.update_consumers(
+            plan,
+            approve=args.approve,
+            dry_run=args.dry_run,
+            only=tuple(args.consumer) if args.consumer else None,
+        )
     if args.command == "push":
         return ExitCode.OK, orch.push(plan, approve=args.approve)
     if args.command == "pr-status":
         status = orch.pr_status(plan)
         approved = status.get("decision", {}).get("approved", True)
         return (ExitCode.OK if approved else ExitCode.BLOCKED), status
+    if args.command == "verify-lineage":
+        return ExitCode.OK, orch.verify_lineage(plan, args.candidate)
     if args.command == "reconcile-prs":
         summary = orch.reconcile_prs(plan)
         return (ExitCode.OK if summary["ok"] else ExitCode.BLOCKED), summary
@@ -351,3 +393,41 @@ def _text_summary(command: str, env: dict[str, Any]) -> str:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+def _split(value: str | None) -> list[str] | None:
+    return None if value is None else [v for v in value.split(",") if v.strip()]
+
+
+def _release_mode(orch: Orchestrator, args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    engine = ModeEngine(orch)
+    if args.action == "discover":
+        return ExitCode.OK, engine.discover()
+    if args.action == "check-preview":
+        if not args.preview:
+            raise InvalidInputError("check-preview needs --preview FILE")
+        preview = json.loads(args.preview.read_text(encoding="utf-8"))
+        return ExitCode.OK, engine.check_preview(preview)
+    if not args.mode:
+        raise InvalidInputError("--mode is required for options and preview")
+    common = {
+        "tickets": args.ticket,
+        "candidate": args.candidate,
+        "order": _split(args.order) or [],
+    }
+    if args.action == "options":
+        return ExitCode.OK, engine.options(args.mode, **common)
+    if not args.choice:
+        raise InvalidInputError("preview needs --choice (an option id from 'options')")
+    preview = engine.preview(
+        args.mode,
+        choice=args.choice,
+        services=_split(args.services),
+        environments=_split(args.environments),
+        **common,
+    )
+    if args.out:
+        args.out.write_text(json.dumps(preview, indent=2), encoding="utf-8")
+        args.out.with_suffix(".md").write_text(render_preview(preview), encoding="utf-8")
+    code = ExitCode.BLOCKED if preview["readiness"] == "BLOCKED" else ExitCode.OK
+    return code, preview

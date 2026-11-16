@@ -179,7 +179,7 @@ def check_eligibility(
             other = tracker.get(blocker)
             if other is not None and other.status in policy.resolved_statuses:
                 continue
-            state = other.status if other else "not in snapshot"
+            state = (other.status or "status unknown") if other else "not in snapshot"
             findings.append(
                 IssueFinding(
                     "UNRESOLVED_BLOCKER",
