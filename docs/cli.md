@@ -101,3 +101,14 @@ New `BLOCKED` reasons: `APPROVAL_NOT_VERIFIED`, `PRODUCTION_PUBLISH_UNAUTHORIZED
 `ARTIFACT_VERSION_MISMATCH`, `ISSUE_DATA_STALE`, `ISSUE_INACCESSIBLE`,
 `ISSUE_NOT_RELEASABLE`, `UNRESOLVED_BLOCKER`, `ISSUE_LINK_CYCLE`. New error codes:
 `GITHUB_ACCESS_DENIED`, `REGISTRY_AUTH_FAILED`, `CONCURRENT_MODIFICATION` (exit 6).
+
+## Release modes (ADR-0014)
+
+| Command | Writes | Purpose |
+|---|---|---|
+| `release-mode discover` | nothing | stable release, pending RCs (contents, containment), pending tickets, services, environments and branches, GitHub refs, uncertainties, fingerprint |
+| `release-mode options --mode M [--ticket K] [--candidate T] [--order A,B]` | nothing | Q1: evidence-backed single-choice options with validity and recommendation |
+| `release-mode preview --mode M ... --choice ID [--services a,b\|all] [--environments e1,e2\|all] [--out F]` | `--out` files only | impact preview; exit 3 when BLOCKED |
+| `release-mode check-preview --preview F` | nothing | `STALE_PREVIEW` (exit 3) if the discovered state changed |
+| `verify-lineage --plan F --candidate T` | run state | final release == candidate except the version file (`LINEAGE_MISMATCH`) |
+| `update-consumers ... --consumer NAME` | as before | restrict the operation to selected services |

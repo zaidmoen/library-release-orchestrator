@@ -1,7 +1,7 @@
 ---
 name: library-release
-description: Plan and prepare a shared-library release in any order (e.g. release Change B before Change A), including release candidates. Analyzes which changes a release needs, detects code, textual and behavioural dependencies, proposes a SemVer/RC version, builds and validates an isolated release branch, pushes only to allowlisted sandbox remotes, prepares draft PRs for the library and affected consumers, and manages prep/stage/master promotion and rollback, never merging or deploying. Use when someone asks to release, cut, ship, promote or roll back a library version or Jira ticket.
-argument-hint: "<TICKET... | \"request\" | SHA...> [--dry-run] [--plan-only] [--base REF] [--source REF] [--config FILE]"
+description: Plan and prepare a shared-library release in any order (e.g. release Change B before Change A), including release candidates. Analyzes which changes a release needs, detects code, textual and behavioural dependencies, proposes a SemVer/RC version, builds and validates an isolated release branch, pushes only to allowlisted sandbox remotes, prepares draft PRs for the library and affected consumers, and manages prep/stage/master promotion and rollback, never merging or deploying. Three interactive modes: release-candidate, release (finalize an RC) and reorder-releases (e.g. rc.23 before rc.22). Use when someone asks to release, cut, ship, promote, reorder or roll back a library version, RC or Jira ticket.
+argument-hint: "[--mode release-candidate|release|reorder-releases] [TICKET...] [--candidate vX-rc.N] [--order rcA,rcB] [--dry-run] [--plan-only] [--config FILE]"
 allowed-tools: Bash(python .claude/skills/library-release/scripts/lro.py *), Read
 ---
 
@@ -13,6 +13,40 @@ step successful unless its JSON says `"ok": true`.
 
 `LRO` means `python .claude/skills/library-release/scripts/lro.py` (put `--config <file>`
 first when the user gave one).
+
+## Release modes (interactive)
+
+Pick the mode from the request (or `intake.release_mode`):
+**release-candidate** ("prepare an RC with FIN-204"), **release** ("release the
+candidate"), **reorder-releases** ("release rc.23 before rc.22"). All three follow these
+steps. The engine computes everything; you only present and ask.
+
+0. **Discovery (automatic, read-only).** `LRO release-mode discover`. Summarise the
+   latest stable release, pending RCs (with `contains` / `own_keys`), pending tickets,
+   services and their pins, environments and branches. Read `uncertainties` aloud and
+   never fill them in.
+1. **Q1, dependency check (single choice).** `LRO release-mode options <intake.mode_args>`.
+   Ask with `AskUserQuestion` (single select): one option per `options[]` entry, the
+   `recommended` one first with "(Recommended)", the label from `label`, and the
+   description from `description` plus the first evidence lines. Mark blocked options
+   "(blocked)" and give their evidence. Never present a blocked option as safe, and never
+   invent a dependency that isn't in `evidence`. If only `stop` is valid, explain why and
+   stop.
+2. **Q2, where to apply (multi select).** Offer the discovered services (mark which are
+   *affected* for the chosen option; the preview tells you) plus "All". Selecting fewer
+   never removes them from the analysis.
+3. **Q3, environments (optional multi select).** Offer the configured environments with
+   their branches. If the user skips, pass nothing: the documented default is **no
+   environment operation**, never production.
+4. **Impact preview.** `LRO release-mode preview <mode_args> --choice <id> --services a,b
+   [--environments prep,stage] --out preview.json`. Show `preview.md` (tables, blockers,
+   warnings, commands). Statuses: READY / BLOCKED / NEEDS VALIDATION / NOT SELECTED.
+   Say plainly that **nothing was executed**.
+5. **Approval gate.** Before running any listed command, run
+   `LRO release-mode check-preview --preview preview.json`. `STALE_PREVIEW` means you must
+   regenerate the preview. Then run the commands in order, asking for an explicit "yes"
+   before each `--approve` step. In **release** mode, `verify-lineage` must pass before
+   `pr`/`publish`. Stop at the first non-zero exit.
 
 ## Workflow
 

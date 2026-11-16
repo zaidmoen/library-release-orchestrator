@@ -121,6 +121,21 @@ GitHub MCP server and recorded with `record-pr` (ADR-0008).
 Assessment: [docs/production-readiness.md](docs/production-readiness.md) ·
 audit: [docs/audit.md](docs/audit.md).
 
+## Release modes (interactive)
+
+Three modes share one workflow: automatic discovery → Q1 dependency check (single
+choice) → Q2 services (multi select) → Q3 environments (optional) → impact preview →
+approval gate.
+
+```bash
+release-orchestrator release-mode options --mode release-candidate --ticket FIN-211
+release-orchestrator release-mode options --mode release --candidate v1.1.0-rc.22
+release-orchestrator release-mode options --mode reorder-releases --order v1.1.0-rc.23,v1.1.0-rc.22
+```
+
+Guide and verified demo output: [docs/release-modes.md](docs/release-modes.md) ·
+[ADR-0014](docs/adr/0014-interactive-release-modes.md).
+
 ## Claude Code Skill
 
 The Skill lives in [.claude/skills/library-release/](.claude/skills/library-release/SKILL.md).
