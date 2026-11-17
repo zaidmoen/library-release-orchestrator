@@ -61,6 +61,18 @@ def library_imports(git: Git, rev: str, top_package: str) -> set[str]:
     return modules
 
 
+def is_impacted(imported: set[str], affected_modules: set[str], top_package: str) -> bool:
+    """A consumer is impacted when it imports a changed module, a parent package of one, or
+    the top-level package itself (``import zaidlibrary``). Importing ``zaidlibrary.payments``
+    does NOT make it impacted by an ``__init__``-only change (version bump, other exports).
+    """
+    return top_package in imported or any(
+        m == a or a.startswith(m + ".") or (m.startswith(a + ".") and a != top_package)
+        for m in imported
+        for a in affected_modules
+    )
+
+
 @dataclass
 class ConsumerTarget:
     name: str
@@ -106,11 +118,7 @@ def assess_consumer(
     target.operator = requirement.operator
     imported = library_imports(git, rev, top_package)
     target.imported_modules = sorted(imported)
-    impacted = top_package in imported or any(
-        m == a or m.startswith(a + ".") or a.startswith(m + ".")
-        for m in imported
-        for a in affected_modules
-    )
+    impacted = is_impacted(imported, affected_modules, top_package)
     if requested_by_ticket:
         targeted = consumer.name in requested_by_ticket
         target.reasons.append("requested by ticket" if targeted else "not requested by ticket(s)")

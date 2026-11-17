@@ -75,3 +75,15 @@ def test_removed_public_symbol_forces_major():
         api_removals=["zaidlibrary.payments.calculate_total"],
     )
     assert decision.bump is BumpLevel.MAJOR and str(decision.proposed) == "2.0.0"
+
+
+def test_release_candidate_numbering_is_per_target_and_monotonic():
+    known = [SemVer.parse(v) for v in ("1.0.0", "1.1.0-rc.22", "1.1.0-rc.23", "1.0.1-rc.9")]
+    decision = recommend_version(
+        [commit("feat: b")], published=[SemVer.parse("1.0.0")], tagged=known, prerelease="rc"
+    )
+    assert str(decision.proposed) == "1.1.0-rc.24" and not decision.collides
+    first = recommend_version(
+        [commit("fix: c")], published=[SemVer.parse("1.0.0")], tagged=[], prerelease="rc"
+    )
+    assert str(first.proposed) == "1.0.1-rc.1"
