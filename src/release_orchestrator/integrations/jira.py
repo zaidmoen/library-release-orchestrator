@@ -38,6 +38,8 @@ class Issue:
     status: str = ""
     blocked_by: tuple[str, ...] = ()  # issue links "is blocked by"
     accessible: bool = True  # False when the snapshot could not read the issue
+    # Jira "Development" panel: PR numbers linked to the issue (when the snapshot has them)
+    pull_requests: tuple[int, ...] = ()
 
 
 class IssueTracker(Protocol):
@@ -86,6 +88,11 @@ class FixtureIssueTracker:
                     str(b) for b in data.get("blocked_by", []) or [] if _KEY_RE.match(str(b))
                 ),
                 accessible=data.get("accessible", True) is not False,
+                pull_requests=tuple(
+                    int(n)
+                    for n in data.get("pull_requests", []) or []
+                    if isinstance(n, int) and not isinstance(n, bool) and n > 0
+                ),
             )
 
     def get(self, key: str) -> Issue | None:

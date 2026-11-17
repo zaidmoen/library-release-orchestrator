@@ -1,7 +1,7 @@
 ---
 name: library-release
 description: Plan and prepare a shared-library release in any order (e.g. release Change B before Change A), including release candidates. Analyzes which changes a release needs, detects code, textual and behavioural dependencies, proposes a SemVer/RC version, builds and validates an isolated release branch, pushes only to allowlisted sandbox remotes, prepares draft PRs for the library and affected consumers, and manages prep/stage/master promotion and rollback, never merging or deploying. Three interactive modes: release-candidate, release (finalize an RC) and reorder-releases (e.g. rc.23 before rc.22). Use when someone asks to release, cut, ship, promote, reorder or roll back a library version, RC or Jira ticket.
-argument-hint: "[--mode release-candidate|release|reorder-releases] [TICKET...] [--candidate vX-rc.N] [--order rcA,rcB] [--dry-run] [--plan-only] [--config FILE]"
+argument-hint: "[--mode release-candidate|release|reorder-releases] [TICKET...] [#PR | PR-URL | --pr N] [--repository owner/name] [--candidate vX-rc.N] [--order rcA,rcB] [--dry-run] [--plan-only] [--config FILE]"
 allowed-tools: Bash(python .claude/skills/library-release/scripts/lro.py *), Read
 ---
 
@@ -12,7 +12,34 @@ correctness; you explain, ask and relay.** Never override a `BLOCKED` result. Ne
 step successful unless its JSON says `"ok": true`.
 
 `LRO` means `python .claude/skills/library-release/scripts/lro.py` (put `--config <file>`
-first when the user gave one).
+first when the user gave one, and `intake.global_args` such as `--repository o/r`).
+
+## Start: context and source change (always, read-only)
+
+Run these before any mode or workflow step. The user should not have to name the
+repository, its path or both a PR and a ticket.
+
+1. **Context.** `LRO context`. It finds the Git repository you're in, the GitHub
+   `owner/name` (from the remote), branch, HEAD, default branch, the config that describes
+   *this* repository, the latest stable tag and the RCs. Each value says where it came from.
+   If `problems[]` isn't empty, explain each one and ask only for its `needs` (for example
+   `--repository owner/name` or `--config <file>`). Never pick another repository or a
+   config for another library (`CONFIG_MISMATCH`).
+2. **Source change** (when the user gave a PR, a ticket, or nothing):
+   `LRO resolve-change <intake.resolve_args>`.
+   * `RESOLVED`: show the PR, its ticket(s), the Jira status and links, related PRs, the RCs
+     containing each ticket and the `prerequisites` (with their state and evidence).
+   * `NEEDS_INPUT`: ask `questions[]` with `AskUserQuestion` (scenario D lists the open PRs
+     targeting the default branch; never choose one yourself). Then rerun with the answer.
+   * `CONFLICT`: show `conflicts[]` (for example "PR #15 is about FIN-211, not FIN-204")
+     and ask which is right. Never resolve it yourself.
+   * Say whether PR data is live (`github-rest (live)`) or a snapshot (`fixture`).
+3. **Dependency graph** (when dependencies or ordering matter):
+   `LRO release-graph [--ticket K]... [--order rcA,rcB]`. Present `dependencies[]` with
+   their **classification** (CONFIRMED / INFERRED / UNKNOWN / BLOCKED) and `sources`,
+   `ancestry[]` separately (**ancestry is content, never a functional dependency**),
+   `overlaps[]` as heuristics, `anomalies[]`, `conflicts[]` and `recommended_order`.
+   INFERRED or UNKNOWN never makes anything READY.
 
 ## Release modes (interactive)
 
@@ -56,6 +83,11 @@ steps. The engine computes everything; you only present and ask.
    environment with its branch, selected or not. Then show blockers, warnings and
    commands. Statuses: READY / BLOCKED / NEEDS VALIDATION / NOT SELECTED. Say plainly that
    **nothing was executed**.
+4b. **Dry-run report and Slack summary.** `LRO release-report --preview preview.json
+   [<intake.resolve_args>] --out release-report`. Show `report.md` (final eligibility
+   READY / BLOCKED / NEEDS REVIEW with reasons) and `slack.txt`. The Slack summary is text
+   to copy: **never post it to Slack** unless the user explicitly asks and approves a send
+   for that exact report; no send command exists in the Skill.
 5. **Approval gate.** Before running any listed command, run
    `LRO release-mode check-preview --preview preview.json`. `STALE_PREVIEW` means you must
    regenerate the preview. Then run the commands in order, asking for an explicit "yes"
@@ -126,6 +158,9 @@ steps. The engine computes everything; you only present and ask.
 | "Show the audit trail" | `LRO status --plan …` and `<state_dir>/reports/<plan_id>.md` | history, provenance, evidence |
 | "Release / finalize the RC" | Release modes: `--mode release` (lineage-checked) | `options[]`, preview |
 | "Release rc.23 before rc.22" | Release modes: `--mode reorder-releases --order …` | `options[]`, `release_steps` |
+| "Release PR #15" / "What does FIN-211 need?" | `LRO resolve-change --pr 15` / `--ticket FIN-211` | `tickets`, `changes[].prerequisites`, `questions[]` |
+| "How do the RCs relate?" / "Show the dependency graph" | `LRO release-graph [--order …]` | `dependencies[]` (classification), `ancestry[]`, `recommended_order` |
+| "Give me a Slack summary" | `LRO release-report --preview … --out …` | `report.eligibility`, `slack.txt` (never sent) |
 
 Publishing with an `approval_policy` requires `pr-status` → `decision.approved: true`. A
 draft PR, a stale approval or a non-green required check means: report and stop.

@@ -118,14 +118,13 @@ def test_rc_mode_issue_link_cycle_blocks(tmp_path):
     root = tmp_path / "lab"
     config = build_lab(root)
     jira = root / "jira.yaml"
+    text = jira.read_text()
+    fin_198 = "    consumers: []\n    pull_requests: [12]\n"
+    fin_204 = '  FIN-204: {summary: "Tax-inclusive order totals", consumers: [payment-service]}'
+    assert fin_198 in text and fin_204 in text, "lab Jira fixture changed; update this test"
     jira.write_text(
-        jira.read_text()
-        .replace(
-            '  FIN-198: {summary: "Currency conversion for cross-border payments", consumers: []}',
-            '  FIN-198: {summary: "Currency", consumers: [], blocked_by: [FIN-204]}',
-        )
-        .replace(
-            '  FIN-204: {summary: "Tax-inclusive order totals", consumers: [payment-service]}',
+        text.replace(fin_198, fin_198 + "    blocked_by: [FIN-204]\n").replace(
+            fin_204,
             '  FIN-204: {summary: "Tax", consumers: [payment-service], blocked_by: [FIN-198]}',
         )
     )

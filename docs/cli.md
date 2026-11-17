@@ -112,3 +112,18 @@ New `BLOCKED` reasons: `APPROVAL_NOT_VERIFIED`, `PRODUCTION_PUBLISH_UNAUTHORIZED
 | `release-mode check-preview --preview F` | nothing | `STALE_PREVIEW` (exit 3) if the discovered state changed |
 | `verify-lineage --plan F --candidate T` | run state | final release == candidate except the version file (`LINEAGE_MISMATCH`) |
 | `update-consumers ... --consumer NAME` | as before | restrict the operation to selected services |
+
+## Discovery and reporting (ADR-0015, all read-only)
+
+| Command | Purpose | Exit codes |
+|---|---|---|
+| `context [--path DIR]` | repository, `owner/name`, branch, HEAD, default branch, config, tags; each with its source | 0 ok, 5 when `problems[]` needs input |
+| `resolve-change [--pr N\|#N\|URL] [--ticket KEY]` | PR ↔ Jira resolution (scenarios A–D) | 0 `RESOLVED`, 5 `NEEDS_INPUT` / `CONFLICT` |
+| `release-graph [--ticket K]... [--order rcA,rcB]` | ancestry, functional dependencies (CONFIRMED/INFERRED/UNKNOWN/BLOCKED), overlaps, ordering | 0, 3 when BLOCKED |
+| `release-report --preview P [--pr] [--ticket] [--out DIR]` | dry-run report + Slack payload/text (never sent) | 0, 3 when BLOCKED; refuses a stale preview |
+
+`--config` is now optional: `$LRO_CONFIG`, then `./release-orchestrator.yaml`, then the
+nearest config (up to 3 parent directories) whose `library.repo` is the current repository.
+`--repository owner/name` overrides the GitHub identity when the remote can't provide it.
+Optional config keys: `pull_requests.snapshot` (PR snapshot file, labelled as such) and
+`dependency_sheet: {provider: csv, path, columns}`.

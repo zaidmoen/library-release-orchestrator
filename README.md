@@ -136,10 +136,30 @@ release-orchestrator release-mode options --mode reorder-releases --order v1.1.0
 Guide and verified demo output: [docs/release-modes.md](docs/release-modes.md) ·
 [ADR-0014](docs/adr/0014-interactive-release-modes.md).
 
+### Discovery, PR/Jira resolution and dependency intelligence
+
+Run from inside the library repository with no flags: the repository, GitHub
+`owner/name`, branch, default branch, config and releases are discovered. One reference
+(a PR *or* a Jira key) is enough when the PR title or branch carries the key.
+
+```bash
+release-orchestrator context
+release-orchestrator resolve-change --pr 15          # or --ticket FIN-211, or nothing
+release-orchestrator release-graph --order v1.1.0-rc.23,v1.1.0-rc.22
+release-orchestrator release-report --preview p.json --pr 15 --out report   # + Slack text
+```
+
+Git ancestry ("rc.23 contains rc.22") is reported as content, never as a functional
+dependency. Dependencies come from Jira links, code analysis or an optional sheet, and
+are classified CONFIRMED / INFERRED / UNKNOWN / BLOCKED. See
+[ADR-0015](docs/adr/0015-discovery-and-dependency-intelligence.md) and the
+[live demo guide](docs/live-demo.md).
+
 ## Claude Code Skill
 
 The Skill lives in [.claude/skills/library-release/](.claude/skills/library-release/SKILL.md).
-Open Claude Code in a directory with a `release-orchestrator.yaml` and run:
+Open Claude Code in the library repository (or a directory with a
+`release-orchestrator.yaml`) and run:
 
 ```
 /library-release FIN-204

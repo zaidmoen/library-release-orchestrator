@@ -108,6 +108,9 @@ class Config:
     issue_release_statuses: tuple[str, ...] = ()
     issue_resolved_statuses: tuple[str, ...] = ("Done", "Released", "Closed")
     issue_max_age_minutes: int | None = None
+    # ADR-0015: optional discovery sources (never required by the release workflow)
+    pull_request_snapshot: Path | None = None  # PR list snapshot (fixture/offline mode)
+    dependency_sheet: dict[str, Any] | None = None  # raw mapping; see dependency_sheet.py
 
     def consumer(self, name: str) -> ConsumerConfig:
         for consumer in self.consumers:
@@ -250,7 +253,20 @@ def parse_config(raw: dict[str, Any], *, base_dir: Path, config_path: Path) -> C
         environments=_environments(raw.get("environments")),
         remote_allowlist=_allowlist(raw.get("remote_allowlist")),
         remote_name=_str(raw, "remote_name", "origin"),
+        pull_request_snapshot=(
+            _path(prs, "snapshot", base_dir) if prs.get("snapshot") is not None else None
+        ),
+        dependency_sheet=_dependency_sheet(raw.get("dependency_sheet"), base_dir, pattern),
     )
+
+
+def _dependency_sheet(raw: Any, base_dir: Path, pattern: str) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    from release_orchestrator.integrations.dependency_sheet import build_sheet
+
+    build_sheet(raw, base_dir=base_dir, key_pattern=pattern)  # validate shape eagerly
+    return dict(raw)
 
 
 def _consumer(item: Any, base_dir: Path) -> ConsumerConfig:

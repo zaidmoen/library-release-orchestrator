@@ -642,7 +642,13 @@ class ModeEngine:
         if choice == STOP:
             blockers.append("Stop selected: no operation will be performed")
         elif not chosen["valid"]:
-            blockers += chosen["evidence"] or [f"option {choice} is blocked"]
+            # Only real blockers block. Context such as Git ancestry ("rc.23 contains
+            # rc.22") or overlap warnings stays in warnings (ADR-0015).
+            step_blockers = [
+                f"{s['label']}: {b['message']}" for s in steps for b in s.get("blockers", [])
+            ]
+            blockers += step_blockers or chosen["evidence"] or [f"option {choice} is blocked"]
+            warnings += [e for e in chosen["evidence"] if e not in blockers and e not in warnings]
         live_steps = [s for s in steps if s["status"] not in ("NO_OP", "SKIPPED")]
         stable = disc["latest_stable"]
         target = live_steps[-1]["version"] if live_steps else stable["version"]
@@ -792,13 +798,18 @@ class ModeEngine:
         return preview
 
     def _dependencies(self, steps: list[dict[str, Any]], keys: list[str]) -> dict[str, Any]:
-        """Relationships with their evidence source. Nothing here is inferred by Claude."""
+        """Relationships with their evidence source. Nothing here is inferred by Claude.
+
+        Git ancestry ("rc.23 contains rc.22") is reported under ``ancestry``: it describes
+        content, and is never presented as a functional dependency (ADR-0015).
+        """
         disc = self.discover()
-        confirmed = [
+        ancestry = [
             {"from": c["tag"], "to": other, "evidence": "git ancestry (contains its commits)"}
             for c in disc["pending_candidates"]
             for other in c["contains"]
         ]
+        confirmed: list[dict[str, Any]] = []
         relevant = {k for step in steps for k in step["keys"]} | {
             b.get("change") for step in steps for b in step["blockers"]
         }
@@ -822,7 +833,7 @@ class ModeEngine:
             for step in steps
             for b in step["blockers"]
         ]
-        return {"confirmed": confirmed, "unresolved": unresolved}
+        return {"ancestry": ancestry, "confirmed": confirmed, "unresolved": unresolved}
 
     def check_preview(self, preview: dict[str, Any]) -> dict[str, Any]:
         current = self.discover()["fingerprint"]
@@ -1167,12 +1178,67 @@ class ModeEngine:
         ]
         if diverged:
             uncertainties.append(f"tags differ between local and remote: {diverged}")
+        prefix = self.config.library.tag_prefix
+        remote_only = sorted(
+            t
+            for t in remote_tags
+            if t.startswith(prefix)
+            and SemVer.try_parse(t[len(prefix) :]) is not None
+            and t not in versions.values()
+        )
+        if remote_only:
+            uncertainties.append(
+                f"release tags exist on GitHub but not locally: {remote_only}; run "
+                f"`git fetch {remote} --tags` (read-only for the remote) and rediscover"
+            )
         return {
             "remote": url,
             "verified": True,
             "tags_missing_on_remote": missing,
+            "tags_missing_locally": remote_only,
             "tags_diverged": diverged,
             "pull_request_refs": remote_prs,
+            "releases": self._github_releases(url, versions, uncertainties),
+        }
+
+    def _github_releases(
+        self, url: str, versions: dict[SemVer, str], uncertainties: list[str]
+    ) -> dict[str, Any]:
+        """GitHub Release objects (metadata). Git tags stay the source of release content."""
+        from release_orchestrator.context import parse_remote
+
+        parsed = parse_remote(url)
+        if parsed is None or parsed[0] != "github.com":
+            return {"read": False, "note": "remote is not on github.com"}
+        reader = getattr(self.orch.s, "github", None)
+        if reader is None:
+            return {"read": False, "note": "no GitHub reader"}
+        try:
+            releases = reader.releases(parsed[1])
+        except OrchestratorError as exc:
+            uncertainties.append(f"GitHub releases unreadable for {parsed[1]}: {exc.message}")
+            return {"read": False, "repository": parsed[1], "note": exc.message}
+        tags = set(versions.values())
+        prefix = self.config.library.tag_prefix
+        mismatched = []
+        for rel in releases:
+            parsed_version = SemVer.try_parse(rel.tag[len(prefix) :])
+            if parsed_version is not None and parsed_version.is_prerelease != rel.prerelease:
+                mismatched.append(
+                    f"{rel.tag}: GitHub prerelease={rel.prerelease} but the version "
+                    f"{'is' if parsed_version.is_prerelease else 'is not'} a pre-release"
+                )
+        if mismatched:
+            uncertainties.append(
+                "GitHub release flags disagree with versions: " + "; ".join(mismatched)
+            )
+        return {
+            "read": True,
+            "repository": parsed[1],
+            "releases": [r.to_dict() for r in releases],
+            "without_tag": sorted(r.tag for r in releases if r.tag not in tags and not r.draft),
+            "tags_without_release": sorted(tags - {r.tag for r in releases}),
+            "flag_mismatches": mismatched,
         }
 
 
@@ -1282,6 +1348,10 @@ def render_preview(preview: dict[str, Any]) -> str:
         )
     deps = preview["dependencies"]
     lines += ["", "## Dependencies", ""]
+    lines += [
+        f"* ancestry (content, not a functional dependency): {d['from']} contains {d['to']}"
+        for d in deps.get("ancestry", [])
+    ]
     lines += [f"* confirmed: {d['from']} -> {d['to']} ({d['evidence']})" for d in deps["confirmed"]]
     lines += [
         f"* **unresolved**: {d['from']} -> {d['to']}: {d['evidence']}" for d in deps["unresolved"]

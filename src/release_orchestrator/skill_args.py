@@ -15,6 +15,7 @@ from release_orchestrator.errors import InvalidInputError
 
 _KEY = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 _SHA = re.compile(r"^[0-9a-f]{7,40}$")
+_PR = re.compile(r"^(#\d{1,9}|https://[^/\s]+/[^/\s]+/[^/\s]+/pull/\d{1,9}/?)$")
 _BOOL_FLAGS = {"--dry-run": "dry_run", "--plan-only": "plan_only"}
 _VALUE_FLAGS = {
     "--base": "base",
@@ -23,13 +24,15 @@ _VALUE_FLAGS = {
     "--mode": "release_mode",
     "--candidate": "candidate",
     "--order": "order",
+    "--pr": "pr",
+    "--repository": "repository",
 }
 RELEASE_MODES = ("release-candidate", "release", "reorder-releases")
 
 
 @dataclass
 class SkillIntake:
-    mode: str  # ticket | commits | text | ask
+    mode: str  # ticket | pr | commits | text | ask
     tickets: list[str] = field(default_factory=list)
     release_mode: str | None = None  # release-candidate | release | reorder-releases
     candidate: str | None = None
@@ -41,6 +44,8 @@ class SkillIntake:
     base: str | None = None
     source: str | None = None
     config: str | None = None
+    pr: str | None = None  # PR number/#number/URL (ADR-0015: one reference is enough)
+    repository: str | None = None  # owner/name override when discovery can't tell
 
     def cli_request_args(self) -> list[str]:
         args: list[str] = []
@@ -63,7 +68,18 @@ class SkillIntake:
         data["max_step"] = "plan" if self.plan_only else ("dry-run" if self.dry_run else "full")
         data["plan_args"] = self.cli_request_args()
         data["mode_args"] = self.mode_args()
+        data["resolve_args"] = self.resolve_args()
+        data["global_args"] = ["--repository", self.repository] if self.repository else []
         return data
+
+    def resolve_args(self) -> list[str]:
+        """Arguments for ``resolve-change`` (PR and/or the single ticket given)."""
+        args: list[str] = []
+        if self.pr:
+            args += ["--pr", self.pr]
+        if len(self.tickets) == 1:
+            args += ["--ticket", self.tickets[0]]
+        return args
 
     def mode_args(self) -> list[str]:
         """Arguments for ``release-mode options|preview`` when a release mode was given."""
@@ -99,6 +115,8 @@ def parse_skill_arguments(raw: str) -> SkillIntake:
             raise InvalidInputError(
                 f"Unknown option {token}", details={"known": sorted([*_BOOL_FLAGS, *_VALUE_FLAGS])}
             )
+        elif _PR.match(token) and intake.pr is None:
+            intake.pr = token
         else:
             words.append(token)
         i += 1
@@ -107,7 +125,11 @@ def parse_skill_arguments(raw: str) -> SkillIntake:
         raise InvalidInputError(
             f"Unknown release mode {intake.release_mode!r}", details={"modes": RELEASE_MODES}
         )
+    if intake.pr is not None and not _PR.match(intake.pr) and not intake.pr.isdigit():
+        raise InvalidInputError(f"--pr must be a number, #number or PR URL, got {intake.pr!r}")
     if not words:
+        if intake.pr is not None:
+            intake.mode = "pr"
         return intake
     if all(_KEY.match(w) for w in words):
         intake.mode, intake.tickets = "ticket", words

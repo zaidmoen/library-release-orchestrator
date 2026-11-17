@@ -49,6 +49,43 @@ class PullStatus:
 
 
 @dataclass(frozen=True)
+class PullSummary:
+    """A pull request as listed for discovery (title/body/branch carry ticket keys)."""
+
+    number: int
+    title: str
+    body: str
+    head_ref: str
+    base_ref: str
+    state: str  # open | closed
+    draft: bool
+    merged: bool
+    head_sha: str
+    url: str
+    author: str = ""
+    source: str = "github-rest"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class ReleaseInfo:
+    """A GitHub Release object (metadata only; Git tags remain the content truth)."""
+
+    tag: str
+    name: str
+    prerelease: bool
+    draft: bool
+    published_at: str
+    target: str
+    url: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class Review:
     user: str
     state: str  # APPROVED | CHANGES_REQUESTED | COMMENTED | DISMISSED | PENDING
@@ -207,6 +244,56 @@ class GitHubReader:
         checks = (data.get("required_status_checks") or {}).get("contexts") or []
         return [str(c) for c in checks]
 
+    # ------------------------------------------------------------ discovery (read-only)
+    def repository(self, repository: str) -> dict[str, Any]:
+        """``default_branch``, ``private`` and ``full_name`` of a repository."""
+        d = self._get(f"/repos/{_repo(repository)}")
+        return {
+            "full_name": str(d.get("full_name", repository)),
+            "default_branch": str(d.get("default_branch") or ""),
+            "private": bool(d.get("private", False)),
+        }
+
+    def pull_summary(self, repository: str, number: int) -> PullSummary:
+        return _pull_summary(self._get(f"/repos/{_repo(repository)}/pulls/{int(number)}"))
+
+    def list_pulls(
+        self, repository: str, *, state: str = "open", base: str | None = None, pages: int = 3
+    ) -> list[PullSummary]:
+        """Pull requests, newest first; bounded to ``pages`` x 100 (never unbounded)."""
+        if state not in ("open", "closed", "all"):
+            raise ValueError(f"invalid PR state {state!r}")
+        query = f"state={state}&per_page=100&sort=created&direction=desc"
+        if base:
+            query += f"&base={urllib.parse.quote(base, safe='')}"
+        result: list[PullSummary] = []
+        for page in range(1, pages + 1):
+            data = self._get(f"/repos/{_repo(repository)}/pulls?{query}&page={page}")
+            result += [_pull_summary(d) for d in data]
+            if len(data) < 100:
+                break
+        return result
+
+    def releases(self, repository: str, *, pages: int = 2) -> list[ReleaseInfo]:
+        result: list[ReleaseInfo] = []
+        for page in range(1, pages + 1):
+            data = self._get(f"/repos/{_repo(repository)}/releases?per_page=100&page={page}")
+            result += [
+                ReleaseInfo(
+                    tag=str(r.get("tag_name", "")),
+                    name=str(r.get("name") or "")[:200],
+                    prerelease=bool(r.get("prerelease", False)),
+                    draft=bool(r.get("draft", False)),
+                    published_at=str(r.get("published_at") or ""),
+                    target=str(r.get("target_commitish") or ""),
+                    url=str(r.get("html_url") or ""),
+                )
+                for r in data
+            ]
+            if len(data) < 100:
+                break
+        return result
+
     def evidence(self, repository: str, number: int) -> PullEvidence:
         pull = self.pull(repository, number)
         reviews = self.reviews(repository, number)
@@ -230,6 +317,22 @@ class GitHubReader:
             # Unreadable is NOT the same as unprotected: record it, never infer "none".
             ev.protection_note = f"unverified ({exc.details.get('status')})"
         return ev
+
+
+def _pull_summary(d: dict[str, Any]) -> PullSummary:
+    return PullSummary(
+        number=int(d["number"]),
+        title=str(d.get("title") or "")[:300],
+        body=str(d.get("body") or "")[:5000],  # untrusted text: only scanned for keys
+        head_ref=str(d["head"]["ref"]),
+        base_ref=str(d["base"]["ref"]),
+        state=str(d.get("state", "")),
+        draft=bool(d.get("draft", False)),
+        merged=bool(d.get("merged_at") or d.get("merged")),
+        head_sha=str(d["head"].get("sha", "")),
+        url=str(d.get("html_url", "")),
+        author=str((d.get("user") or {}).get("login", "")),
+    )
 
 
 def _repo(repository: str) -> str:

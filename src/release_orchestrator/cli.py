@@ -17,22 +17,38 @@ from typing import Any
 
 from release_orchestrator import __version__
 from release_orchestrator.config import load_config
+from release_orchestrator.context import RepoContext, discover_context
 from release_orchestrator.demo import SCENARIOS, build_demo
 from release_orchestrator.environments import EnvironmentLedger
 from release_orchestrator.errors import (
     BlockedError,
+    ConfigError,
     ExitCode,
     InvalidInputError,
     OrchestratorError,
 )
+from release_orchestrator.integrations.dependency_sheet import SheetSnapshot, build_sheet
 from release_orchestrator.integrations.github_status import (
     ApprovalPolicy,
     GitHubReader,
     evaluate_approval,
 )
+from release_orchestrator.integrations.linkage import (
+    ChangeResolver,
+    GitHubPullSource,
+    PullSource,
+    SnapshotPullSource,
+)
 from release_orchestrator.lab import build_lab
 from release_orchestrator.modes import MODES, ModeEngine, render_preview
 from release_orchestrator.planning.manifest import load_plan
+from release_orchestrator.release_graph import build_release_graph
+from release_orchestrator.reporting.release_report import (
+    build_report,
+    render_markdown,
+    render_slack,
+    render_slack_text,
+)
 from release_orchestrator.workflow import Orchestrator, RequestInput, Services, write_plan
 
 WRITE_COMMANDS = {"prepare", "pr", "publish", "update-consumers", "push", "promote", "rollback"}
@@ -75,8 +91,14 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=Path,
-        default=Path(os.environ.get("LRO_CONFIG", "release-orchestrator.yaml")),
-        help="trusted config file (default: $LRO_CONFIG or ./release-orchestrator.yaml)",
+        default=None,
+        help="trusted config file (default: $LRO_CONFIG, ./release-orchestrator.yaml, or the "
+        "nearest config describing the current repository)",
+    )
+    parser.add_argument(
+        "--repository",
+        dest="repository_override",
+        help="GitHub owner/name override when it can't be discovered from the Git remote",
     )
     parser.add_argument("--json", action="store_true", help="emit a JSON envelope on stdout")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -186,6 +208,23 @@ def build_parser() -> argparse.ArgumentParser:
             p.add_argument("--approved-by", action="append", default=[])
             p.add_argument("--approve", action="store_true")
 
+    ctx = sub.add_parser("context", help="discover repository, branch, config and tags (read-only)")
+    ctx.add_argument("--path", type=Path, default=None, help="directory to inspect (default: cwd)")
+
+    res = sub.add_parser("resolve-change", help="PR <-> Jira resolution from one reference")
+    res.add_argument("--pr", help="PR number, #number or URL")
+    res.add_argument("--ticket", help="Jira key, e.g. FIN-211")
+
+    graph = sub.add_parser("release-graph", help="release ordering and dependency graph")
+    graph.add_argument("--ticket", action="append", default=None, help="selection (repeatable)")
+    graph.add_argument("--order", help="requested candidate order, comma-separated")
+
+    rep = sub.add_parser("release-report", help="dry-run report + Slack-ready summary")
+    rep.add_argument("--preview", type=Path, required=True, help="preview JSON (release-mode)")
+    rep.add_argument("--pr", help="source PR (number, #number or URL)")
+    rep.add_argument("--ticket", help="source Jira key")
+    rep.add_argument("--out", type=Path, help="directory for report.md/json and slack.json/txt")
+
     lab = sub.add_parser("lab-init", help="create the release lab (library + 2 consumers)")
     lab.add_argument("--dest", type=Path, required=True)
 
@@ -217,11 +256,22 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     if args.command == "lab-init":
         return ExitCode.OK, {"config": str(build_lab(args.dest))}
 
-    config = load_config(args.config)
+    if args.command == "context":
+        context, _ = discover_context(
+            args.path or Path.cwd(),
+            config_path=_explicit_config(args),
+            repository=args.repository_override,
+            reader=GitHubReader(),
+        )
+        return (ExitCode.OK if context.ok else ExitCode.AMBIGUOUS_OR_NOT_FOUND), context.to_dict()
+
+    config = load_config(_config_path(args))
     orch = Orchestrator(Services.from_config(config))
 
     if args.command == "release-mode":
         return _release_mode(orch, args)
+    if args.command in ("resolve-change", "release-graph", "release-report"):
+        return _discovery_command(orch, args)
 
     if args.command in ("env-status", "promote", "rollback-plan", "rollback"):
         ledger = EnvironmentLedger(config, orch.s.registry)
@@ -431,3 +481,118 @@ def _release_mode(orch: Orchestrator, args: argparse.Namespace) -> tuple[ExitCod
         args.out.with_suffix(".md").write_text(render_preview(preview), encoding="utf-8")
     code = ExitCode.BLOCKED if preview["readiness"] == "BLOCKED" else ExitCode.OK
     return code, preview
+
+
+# --------------------------------------------------------------------------- discovery (ADR-0015)
+def _explicit_config(args: argparse.Namespace) -> Path | None:
+    if args.config is not None:
+        return Path(args.config)
+    env = os.environ.get("LRO_CONFIG")
+    return Path(env) if env else None
+
+
+def _config_path(args: argparse.Namespace) -> Path:
+    """Explicit config, else ./release-orchestrator.yaml, else the nearest config that
+    describes the repository the command runs in (never one for another repository)."""
+    explicit = _explicit_config(args)
+    if explicit is not None:
+        return explicit
+    local = Path("release-orchestrator.yaml")
+    if local.is_file():
+        return local
+    context, config = discover_context(Path.cwd(), repository=args.repository_override)
+    if config is None:
+        problems = [p.to_dict() for p in context.problems]
+        raise ConfigError(
+            "No release config describes this repository; pass --config <file>",
+            details={"problems": problems, "searched_from": context.cwd},
+        )
+    return config.config_path
+
+
+def _context_for(orch: Orchestrator, args: argparse.Namespace) -> RepoContext:
+    context, _ = discover_context(
+        orch.config.library.repo,
+        config_path=orch.config.config_path,
+        repository=args.repository_override,
+        reader=orch.s.github,
+    )
+    return context
+
+
+def _pull_source(orch: Orchestrator, context: RepoContext) -> PullSource | None:
+    if orch.config.pull_request_snapshot is not None:
+        return SnapshotPullSource(orch.config.pull_request_snapshot)
+    if context.repository and context.host == "github.com":
+        return GitHubPullSource(orch.s.github, context.repository)
+    return None
+
+
+def _sheet(config: Any) -> SheetSnapshot | None:
+    if config.dependency_sheet is None:
+        return None
+    return build_sheet(
+        config.dependency_sheet,
+        base_dir=config.config_path.parent,
+        key_pattern=config.change_key_pattern,
+    ).snapshot()
+
+
+def _discovery_command(
+    orch: Orchestrator, args: argparse.Namespace
+) -> tuple[ExitCode, dict[str, Any]]:
+    engine = ModeEngine(orch)
+    context = _context_for(orch, args)
+    if args.command == "release-graph":
+        graph = build_release_graph(
+            engine, sheet=_sheet(orch.config), selection=args.ticket, order=_split(args.order)
+        )
+        code = ExitCode.BLOCKED if graph["eligibility"] == "BLOCKED" else ExitCode.OK
+        return code, {"context": context.to_dict(), "graph": graph}
+
+    linkage = None
+    if args.command == "resolve-change" or args.pr or args.ticket:
+        resolver = ChangeResolver(
+            git=orch.s.git,
+            key_pattern=orch.config.change_key_pattern,
+            pulls=_pull_source(orch, context),
+            tracker=orch.s.tracker,
+            discovery=engine.discover(),
+            repository=context.repository,
+            default_branch=context.default_branch,
+        )
+        linkage = resolver.resolve(pr=args.pr, ticket=args.ticket)
+    if args.command == "resolve-change" and linkage is not None:
+        code = ExitCode.OK if linkage["status"] == "RESOLVED" else ExitCode.AMBIGUOUS_OR_NOT_FOUND
+        return code, {"context": context.to_dict(), "resolution": linkage}
+
+    preview = json.loads(args.preview.read_text(encoding="utf-8"))
+    engine.check_preview(preview)  # a stale preview can't be reported as current
+    selection = sorted({k for s in preview["release_steps"] for k in s["tickets"]})
+    order = (
+        [s["candidate"] for s in preview["release_steps"] if s["candidate"]]
+        if preview["mode"] == "reorder-releases"
+        else None
+    )
+    graph = build_release_graph(engine, sheet=_sheet(orch.config), selection=selection, order=order)
+    report = build_report(
+        context=context.to_dict(),
+        preview=preview,
+        graph=graph,
+        linkage=linkage,
+        discovery=engine.discover(),
+    )
+    result: dict[str, Any] = {"report": report, "slack": render_slack(report)}
+    if args.out:
+        args.out.mkdir(parents=True, exist_ok=True)
+        files = {
+            "report.json": json.dumps(report, indent=2, default=str),
+            "report.md": render_markdown(report),
+            "slack.json": json.dumps(result["slack"], indent=2),
+            "slack.txt": render_slack_text(report),
+        }
+        for name, text in files.items():
+            (args.out / name).write_text(text, encoding="utf-8")
+        result["files"] = {name: str(args.out / name) for name in files}
+    code = ExitCode.BLOCKED if report["eligibility"] == "BLOCKED" else ExitCode.OK
+    return code, result
