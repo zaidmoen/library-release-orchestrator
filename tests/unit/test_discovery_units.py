@@ -232,3 +232,32 @@ def test_skill_intake_accepts_one_pr_reference():
     assert both["mode_args"] == ["--mode", "release-candidate", "--ticket", "FIN-211"]
     with pytest.raises(InvalidInputError):
         parse_skill_arguments("--pr ../../etc")
+
+
+def test_intake_builds_the_single_assess_call():
+    cases = {
+        "": [],
+        "#15": ["--pr", "#15"],
+        "FIN-211": ["--ticket", "FIN-211"],
+        "FIN-211 #15": ["--pr", "#15", "--ticket", "FIN-211"],
+        "v1.1.0-rc.22": ["--candidate", "v1.1.0-rc.22"],
+        "https://github.com/o/r/pull/15": ["--pr", "https://github.com/o/r/pull/15"],
+    }
+    for raw, expected in cases.items():
+        assert parse_skill_arguments(raw).to_dict()["assess_args"] == expected, raw
+    assert parse_skill_arguments("v1.1.0-rc.22").to_dict()["mode"] == "release"
+
+
+def test_brief_card_is_compact_and_has_no_location_when_unknown():
+    from release_orchestrator.assess import render_brief
+
+    payload = {
+        "icon": "⚪",
+        "status": "UNKNOWN",
+        "headline": "FIN-204 compatibility can't be determined",
+        "why": ["a", "b", "c", "d", "e"],
+        "next": ["x", "y", "z", "w"],
+    }
+    card = render_brief(payload)
+    assert len(card.splitlines()) <= 8
+    assert card.startswith("⚪ UNKNOWN")

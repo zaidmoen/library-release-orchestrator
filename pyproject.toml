@@ -29,7 +29,10 @@ where = ["src"]
 testpaths = ["tests"]
 pythonpath = ["."]
 addopts = "-ra --strict-markers"
-markers = ["integration: tests that build real Git repositories"]
+markers = [
+  "integration: tests that build real Git repositories",
+  "benchmark: performance gates (Git call counts; times on Linux)",
+]
 
 [tool.ruff]
 line-length = 100

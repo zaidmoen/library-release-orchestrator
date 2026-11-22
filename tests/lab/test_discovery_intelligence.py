@@ -45,6 +45,18 @@ def git(path: Path, *args: str) -> str:
     ).stdout.strip()
 
 
+def run_state_files(state_dir: Path) -> list[str]:
+    """Release run state, excluding the immutable analysis cache (ADR-0016)."""
+    if not state_dir.exists():
+        return []
+    cache = state_dir / "cache"
+    return sorted(
+        str(p.relative_to(state_dir))
+        for p in state_dir.rglob("*")
+        if cache not in p.parents and p != cache
+    )
+
+
 def resolver(lab: Lab) -> ChangeResolver:
     lab.reload()
     engine = ModeEngine(lab.orch)
@@ -368,11 +380,7 @@ def test_cli_report_is_read_only_and_slack_ready(shared, capsys, monkeypatch, tm
         fake_repository,
     )
     before = snapshot_repo(shared.lib)
-    state = (
-        sorted(p.name for p in (shared.root / ".lro-state").rglob("*"))
-        if (shared.root / ".lro-state").exists()
-        else []
-    )
+    state = run_state_files(shared.root / ".lro-state")
     preview = tmp_path / "p.json"
     code = main(
         [
@@ -415,7 +423,8 @@ def test_cli_report_is_read_only_and_slack_ready(shared, capsys, monkeypatch, tm
     report = result["report"]
     assert report["eligibility"] == "NEEDS REVIEW"  # no validation evidence yet
     assert report["repository"]["name"] == "zaidmoen/zaidlibrary"
-    assert report["repository"]["default_branch"] == "main" and calls == ["zaidmoen/zaidlibrary"]
+    # ADR-0016: with a PR given, the default branch is not needed, so no GitHub call is made
+    assert report["repository"]["default_branch"] == "main" and calls == []
     assert report["source_change"]["pull_request"]["number"] == 15
     assert report["source_change"]["pull_request"]["data"] == "fixture"
     assert report["missing_prerequisites"] == []  # FIN-198 is selected with FIN-211
@@ -433,12 +442,11 @@ def test_cli_report_is_read_only_and_slack_ready(shared, capsys, monkeypatch, tm
     assert "Final eligibility: NEEDS REVIEW" in (out_dir / "report.md").read_text(encoding="utf-8")
     # dry run: no repository or run-state change
     assert snapshot_repo(shared.lib) == before
-    after = (
-        sorted(p.name for p in (shared.root / ".lro-state").rglob("*"))
-        if (shared.root / ".lro-state").exists()
-        else []
-    )
+    after = run_state_files(shared.root / ".lro-state")
     assert after == state
+    # the only new files are immutable analysis facts (ADR-0016), never run or mutable state
+    cache = shared.root / ".lro-state" / "cache" / "v1"
+    assert {p.name for p in cache.iterdir()} <= {"commit", "patch_id", "effects", "probe", "git"}
 
 
 def test_report_refuses_a_stale_preview(lab, capsys, monkeypatch, tmp_path):
