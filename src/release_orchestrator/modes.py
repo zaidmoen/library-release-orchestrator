@@ -40,7 +40,7 @@ from release_orchestrator.errors import (
     OrchestratorError,
 )
 from release_orchestrator.gitutil.history import HistoryScan, scan_history
-from release_orchestrator.gitutil.repo import Git
+from release_orchestrator.gitutil.repo import Git, optimizations_enabled
 from release_orchestrator.integrations.jira import NullIssueTracker
 from release_orchestrator.integrations.pull_requests import ExternalPullRequestProvider
 from release_orchestrator.models import BumpLevel
@@ -156,6 +156,7 @@ class ModeEngine:
         self.git: Git = orch.s.git
         self._plans: dict[tuple[Any, ...], tuple[ReleasePlan | None, dict[str, Any] | None]] = {}
         self._discovery: dict[str, Any] | None = None
+        self._scans: dict[tuple[str, str, str, str], HistoryScan] = {}
 
     # ------------------------------------------------------------------ discovery
     def discover(self) -> dict[str, Any]:
@@ -848,9 +849,23 @@ class ModeEngine:
 
     # ------------------------------------------------------------------ helpers
     def _scan(self, base: str, source: str) -> HistoryScan:
-        return scan_history(
-            self.git, base_ref=base, source_ref=source, key_pattern=self.config.change_key_pattern
-        )
+        if not optimizations_enabled():
+            return scan_history(
+                self.git,
+                base_ref=base,
+                source_ref=source,
+                key_pattern=self.config.change_key_pattern,
+            )
+        # Refs are resolved on every call (mutable); the scan of a SHA range is immutable.
+        key = (self.git.rev_parse(base), self.git.rev_parse(source), base, source)
+        if key not in self._scans:
+            self._scans[key] = scan_history(
+                self.git,
+                base_ref=base,
+                source_ref=source,
+                key_pattern=self.config.change_key_pattern,
+            )
+        return self._scans[key]
 
     def _plan(
         self, keys: list[str], base: str, source: str, prerelease: str | None

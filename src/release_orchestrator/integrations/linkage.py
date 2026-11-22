@@ -314,16 +314,8 @@ class ChangeResolver:
         stable = self.disc.get("latest_stable")
         if not stable or not re.fullmatch(r"[A-Za-z0-9_-]+", key):
             return None
-        out = self.git.out(
-            "log",
-            stable["tag"],
-            "-n",
-            "1",
-            "--format=%H",
-            "-E",
-            # keys are validated against [A-Z0-9-] shapes, so they are literal in ERE
-            f"--grep=(^|[^A-Z0-9-]){key}([^0-9]|$)",
-        )
+        # keys are validated against [A-Z0-9-] shapes, so they are literal in ERE
+        out = self.git.first_commit_matching(stable["sha"], f"(^|[^A-Z0-9-]){key}([^0-9]|$)")
         return stable["tag"] if out else None
 
     def _change(self, key: str, out: dict[str, Any]) -> dict[str, Any]:

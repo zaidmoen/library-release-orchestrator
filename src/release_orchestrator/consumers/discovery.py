@@ -38,9 +38,8 @@ def find_requirement(text: str, library: str) -> Requirement | None:
 
 def library_imports(git: Git, rev: str, top_package: str) -> set[str]:
     """Modules of the library imported by any Python file at ``rev`` (static, no execution)."""
-    listing = git.out("ls-tree", "-r", "--name-only", rev)
     modules: set[str] = set()
-    for path in listing.splitlines():
+    for path in git.ls_files_at(rev):
         if not path.endswith(".py"):
             continue
         source = git.show_file(rev, path)

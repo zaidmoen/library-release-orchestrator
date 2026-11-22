@@ -236,17 +236,7 @@ def build_release_graph(
             released_cache[key] = (
                 bool(stable)
                 and key_ok(key)
-                and bool(
-                    git.out(
-                        "log",
-                        stable["tag"],
-                        "-n",
-                        "1",
-                        "--format=%H",
-                        "-E",
-                        f"--grep=(^|[^A-Z0-9-]){key}([^0-9]|$)",
-                    )
-                )
+                and bool(git.first_commit_matching(stable["sha"], f"(^|[^A-Z0-9-]){key}([^0-9]|$)"))
             )
         return released_cache[key]
 

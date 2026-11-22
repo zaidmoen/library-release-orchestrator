@@ -7,16 +7,21 @@ can force-push, merge, reset, or delete branches, even by mistake.
 
 from __future__ import annotations
 
+import atexit
 import io
 import logging
 import os
+import re
 import subprocess
 import tarfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Iterator
+from contextlib import contextmanager, suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TypeVar
 
+from release_orchestrator import cache as disk_cache
 from release_orchestrator.errors import ForbiddenOperationError, GitError
 from release_orchestrator.models import CommitInfo, FileChange
 
@@ -133,6 +138,257 @@ def retry(
     raise AssertionError("unreachable")
 
 
+_FULL_SHA = re.compile(r"^[0-9a-f]{40}$")
+
+
+@dataclass
+class GitStats:
+    """Process-wide Git cost counters (benchmarks and ``--timings``)."""
+
+    calls: int = 0
+    seconds: float = 0.0
+    batch_reads: int = 0
+    memo_hits: int = 0
+    by_command: dict[str, int] = field(default_factory=dict)
+
+    def reset(self) -> None:
+        self.calls, self.seconds, self.batch_reads, self.memo_hits = 0, 0.0, 0, 0
+        self.by_command = {}
+
+    def snapshot(self) -> dict[str, object]:
+        return {
+            "subprocess_calls": self.calls,
+            "subprocess_seconds": round(self.seconds, 3),
+            "batch_object_reads": self.batch_reads,
+            "memo_hits": self.memo_hits,
+            "by_command": dict(sorted(self.by_command.items())),
+        }
+
+
+STATS = GitStats()
+
+
+@dataclass
+class NetworkStats:
+    """Network / connector time: ``git ls-remote`` and GitHub REST calls."""
+
+    calls: int = 0
+    seconds: float = 0.0
+    git_seconds: float = 0.0  # the part of STATS.seconds that was network (ls-remote)
+
+    def reset(self) -> None:
+        self.calls, self.seconds, self.git_seconds = 0, 0.0, 0.0
+
+
+NETWORK = NetworkStats()
+
+# Performance switch (ADR-0016). Every optimisation below is exact: reads are memoised only
+# when they are addressed by a full commit SHA (immutable content), per repository path.
+# ``LRO_OPTIMIZE=0`` (or ``set_optimizations(False)``) runs the original code paths; the
+# differential tests compare both modes.
+_OPTIMIZE = os.environ.get("LRO_OPTIMIZE", "1") != "0"
+_MEMO: dict[tuple[str, ...], object] = {}
+
+
+def set_optimizations(enabled: bool) -> None:
+    global _OPTIMIZE
+    _OPTIMIZE = enabled
+    clear_memo()
+
+
+def optimizations_enabled() -> bool:
+    return _OPTIMIZE
+
+
+def clear_memo() -> None:
+    _MEMO.clear()
+    close_readers()
+
+
+_SNAPSHOT: set[str] | None = None  # repository paths whose refs are frozen for this run
+
+
+@contextmanager
+def read_snapshot(paths: Iterable[Path]) -> Iterator[None]:
+    """Resolve each ref of ``paths`` at most once inside a **read-only** command.
+
+    Refs are mutable, so they are never cached across runs; inside one read-only run the
+    first resolution is reused, which also makes the run internally consistent. Only the
+    user's repositories are listed: sandbox clones (whose HEAD moves) are never frozen.
+    Never used around commands that write.
+    """
+    global _SNAPSHOT
+    previous = _SNAPSHOT
+    _SNAPSHOT = {str(Path(p).resolve()) for p in paths} if _OPTIMIZE else None
+    try:
+        yield
+    finally:
+        _SNAPSHOT = previous
+        for key in [k for k in _MEMO if k[1] in ("ref", "tags")]:
+            del _MEMO[key]
+
+
+def _is_sha(value: str) -> bool:
+    return bool(_FULL_SHA.match(value))
+
+
+class _ReaderError(Exception):
+    """The batch reader failed (dead process, broken pipe, protocol error). Callers fall
+    back to the original ``git show`` path: a read failure is never a "missing file"."""
+
+
+class _NotABlob(Exception):
+    """The object exists but isn't a file (a tree, a submodule): use ``git show``."""
+
+
+class _BatchReader:
+    """One persistent ``git cat-file --batch`` for one repository, owned by a session."""
+
+    def __init__(self, path: Path) -> None:
+        env = {**os.environ, "GIT_TERMINAL_PROMPT": "0", "LC_ALL": "C", "LANG": "C"}
+        _guard(("cat-file", "--batch"))
+        try:
+            self._proc = subprocess.Popen(
+                ["git", "-c", "core.longpaths=true", "-C", str(path), "cat-file", "--batch"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                env=env,
+            )
+        except OSError as exc:
+            raise _ReaderError(f"cannot start git cat-file: {exc}") from exc
+        STATS.calls += 1
+        STATS.by_command["cat-file --batch (process)"] = (
+            STATS.by_command.get("cat-file --batch (process)", 0) + 1
+        )
+
+    @property
+    def alive(self) -> bool:
+        return self._proc.poll() is None
+
+    def read(self, spec: str) -> bytes | None:
+        """Blob content; ``None`` only when Git answers "missing" (exactly when ``git
+        show rev:path`` fails). A non-blob raises ``_NotABlob``; anything else raises."""
+        proc = self._proc
+        if proc.stdin is None or proc.stdout is None or proc.poll() is not None:
+            raise _ReaderError("cat-file process is not running")
+        wanted = spec.encode("utf-8")
+        start = time.perf_counter()
+        try:
+            proc.stdin.write(wanted + b"\n")
+            proc.stdin.flush()
+            line = proc.stdout.readline()
+            if not line.endswith(b"\n"):
+                raise _ReaderError("cat-file closed its output (EOF)")
+            line = line[:-1]
+            # "<spec> missing" / "<spec> ambiguous": the spec may itself contain spaces
+            if line in (wanted + b" missing", wanted + b" ambiguous"):
+                return None
+            oid, kind, size_text = line.rsplit(b" ", 2)
+            if not (_FULL_SHA.match(oid.decode("ascii", "replace")) and size_text.isdigit()):
+                raise _ReaderError(f"unexpected cat-file header {line[:120]!r}")
+            size = int(size_text)
+            data = proc.stdout.read(size)
+            if len(data) != size or proc.stdout.read(1) != b"\n":
+                raise _ReaderError("cat-file returned a truncated object")
+            if kind != b"blob":
+                raise _NotABlob(kind.decode("ascii", "replace"))
+            return data
+        except (OSError, ValueError) as exc:
+            raise _ReaderError(f"cat-file read failed: {exc}") from exc
+        finally:
+            STATS.batch_reads += 1
+            STATS.seconds += time.perf_counter() - start
+
+    def close(self) -> None:
+        """Release the process and every pipe handle (needed on Windows to delete repos)."""
+        proc = self._proc
+        with suppress(Exception):
+            if proc.stdin:
+                proc.stdin.close()  # EOF: cat-file exits on its own
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            with suppress(Exception):
+                proc.kill()
+                proc.wait(timeout=5)
+        with suppress(Exception):
+            if proc.stdout:
+                proc.stdout.close()
+
+
+# Readers exist only inside ``git_session()``; at most MAX_READERS per session (LRU).
+MAX_READERS = 8
+_SESSION_DEPTH = 0
+
+
+@contextmanager
+def git_session() -> Iterator[None]:
+    """Own the batch readers of one unit of work (a CLI command, a test).
+
+    Every reader opened inside is closed on exit, including when an exception
+    interrupts the work. Outside a session no reader is ever started (reads use the
+    original ``git show`` path), so long-lived processes can't accumulate them.
+    """
+    global _SESSION_DEPTH
+    _SESSION_DEPTH += 1
+    try:
+        yield
+    finally:
+        _SESSION_DEPTH -= 1
+        if _SESSION_DEPTH == 0:
+            close_readers()
+
+
+def close_readers() -> None:
+    while _READERS:
+        _READERS.pop(next(iter(_READERS))).close()
+
+
+def open_reader_count() -> int:
+    return sum(1 for r in _READERS.values() if r.alive)
+
+
+_READERS: dict[str, _BatchReader] = {}
+atexit.register(close_readers)  # safety net only; sessions close readers deterministically
+
+
+def _commit_to_json(c: CommitInfo) -> dict[str, object]:
+    return {
+        "sha": c.sha,
+        "parents": list(c.parents),
+        "an": c.author_name,
+        "ae": c.author_email,
+        "subject": c.subject,
+        "body": c.body,
+        "files": [[f.status, f.path, f.old_path] for f in c.files],
+    }
+
+
+def _commit_from_json(d: object) -> CommitInfo | None:
+    try:
+        assert isinstance(d, dict)  # noqa: S101
+        return CommitInfo(
+            sha=str(d["sha"]),
+            parents=tuple(str(p) for p in d["parents"]),
+            author_name=str(d["an"]),
+            author_email=str(d["ae"]),
+            subject=str(d["subject"]),
+            body=str(d["body"]),
+            files=tuple(
+                FileChange(str(s), str(p), o if o is None else str(o)) for s, p, o in d["files"]
+            ),
+        )
+    except (AssertionError, KeyError, TypeError, ValueError):
+        return None  # corrupted entry: recompute
+
+
+def _text(data: bytes) -> str:
+    """Decode exactly like ``subprocess.run(text=True, encoding='utf-8', errors='replace')``
+    (universal newlines), so batched reads equal ``git show`` output byte for byte."""
+    return data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+
+
 class Git:
     """Git operations bound to one repository or worktree directory."""
 
@@ -142,6 +398,48 @@ class Git:
         self.path = Path(path)
         self.network_attempts = network_attempts
         self._sleep = sleep
+        self._key = str(self.path.resolve())
+
+    def _memo(self, op: str, *args: str) -> tuple[tuple[str, ...], object | None]:
+        key = (self._key, op, *args)
+        value = _MEMO.get(key)
+        if value is not None:
+            STATS.memo_hits += 1
+        return key, value
+
+    def _immutable(self, op: str, args: tuple[str, ...], compute: Callable[[], T]) -> T:
+        """Memo + disk cache for a Git query whose answer is fixed by full SHAs."""
+        key = (self._key, op, *args)
+        if key in _MEMO:
+            STATS.memo_hits += 1
+            return _MEMO[key]  # type: ignore[return-value]
+        stored = disk_cache.active().get("git", op, *args)
+        if stored is not None:
+            _MEMO[key] = stored
+            return stored  # type: ignore[no-any-return]
+        value = compute()
+        _MEMO[key] = value
+        disk_cache.active().put("git", value, op, *args)
+        return value
+
+    def _reader(self) -> _BatchReader | None:
+        """The session's reader for this repository (``None`` outside a session)."""
+        if _SESSION_DEPTH == 0:
+            return None
+        reader = _READERS.pop(self._key, None)
+        if reader is None or not reader.alive:
+            if reader is not None:
+                reader.close()
+            reader = _BatchReader(self.path)
+            while len(_READERS) >= MAX_READERS:  # evict the least recently used
+                _READERS.pop(next(iter(_READERS))).close()
+        _READERS[self._key] = reader  # most recently used last
+        return reader
+
+    def _drop_reader(self) -> None:
+        reader = _READERS.pop(self._key, None)
+        if reader is not None:
+            reader.close()
 
     # ------------------------------------------------------------------ plumbing
     def run(
@@ -163,6 +461,9 @@ class Git:
             env |= {"GIT_AUTHOR_NAME": BOT_NAME, "GIT_AUTHOR_EMAIL": BOT_EMAIL}
         cmd = ["git", "-c", "core.longpaths=true", "-C", str(self.path), *args]
         log.debug("git", extra={"argv": cmd[3:]})
+        STATS.calls += 1
+        STATS.by_command[args[0]] = STATS.by_command.get(args[0], 0) + 1
+        started = time.perf_counter()
         try:
             proc = subprocess.run(
                 cmd,
@@ -177,6 +478,8 @@ class Git:
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise GitError(f"Failed to run git {args[0]}: {exc}") from exc
+        finally:
+            STATS.seconds += time.perf_counter() - started
         if check and proc.returncode != 0:
             raise GitError(
                 f"git {args[0]} failed (exit {proc.returncode}): {proc.stderr.strip()[:500]}",
@@ -192,6 +495,21 @@ class Git:
         return self.run("rev-parse", "--git-dir", check=False).returncode == 0
 
     def rev_parse(self, ref: str) -> str:
+        if _OPTIMIZE and _is_sha(ref):  # a full SHA resolves to itself (or fails) for ever
+            key, hit = self._memo("sha", ref)
+            if hit is None:
+                hit = _MEMO[key] = self._rev_parse(ref)
+            assert isinstance(hit, str)  # noqa: S101
+            return hit
+        if _SNAPSHOT is not None and self._key in _SNAPSHOT:
+            key, hit = self._memo("ref", ref)
+            if hit is None:
+                hit = _MEMO[key] = self._rev_parse(ref)
+            assert isinstance(hit, str)  # noqa: S101
+            return hit
+        return self._rev_parse(ref)
+
+    def _rev_parse(self, ref: str) -> str:
         proc = self.run("rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}", check=False)
         if proc.returncode != 0:
             raise GitError(f"Cannot resolve revision '{ref}'", details={"ref": ref})
@@ -204,12 +522,35 @@ class Git:
             return None
 
     def is_ancestor(self, ancestor: str, descendant: str) -> bool:
+        if _OPTIMIZE and _is_sha(ancestor) and _is_sha(descendant):  # immutable relation
+            return bool(
+                self._immutable(
+                    "ancestor",
+                    (ancestor, descendant),
+                    lambda: self._is_ancestor(ancestor, descendant),
+                )
+            )
+        return self._is_ancestor(ancestor, descendant)
+
+    def _is_ancestor(self, ancestor: str, descendant: str) -> bool:
         proc = self.run("merge-base", "--is-ancestor", ancestor, descendant, check=False)
         if proc.returncode not in (0, 1):
             raise GitError(f"merge-base failed: {proc.stderr.strip()}")
         return proc.returncode == 0
 
     def rev_list(self, range_spec: str, *, no_merges: bool = True) -> list[str]:
+        a, sep, b = range_spec.partition("..")
+        if _OPTIMIZE and sep and _is_sha(a) and _is_sha(b):  # a SHA range is immutable
+            return list(
+                self._immutable(
+                    "rev_list",
+                    (range_spec, str(no_merges)),
+                    lambda: self._rev_list(range_spec, no_merges=no_merges),
+                )
+            )
+        return self._rev_list(range_spec, no_merges=no_merges)
+
+    def _rev_list(self, range_spec: str, *, no_merges: bool = True) -> list[str]:
         args = ["rev-list", "--reverse", "--topo-order"]
         if no_merges:
             args.append("--no-merges")
@@ -217,10 +558,42 @@ class Git:
         return out.split() if out else []
 
     def merge_commits(self, range_spec: str) -> list[str]:
+        a, sep, b = range_spec.partition("..")
+        if _OPTIMIZE and sep and _is_sha(a) and _is_sha(b):
+            return list(
+                self._immutable("merges", (range_spec,), lambda: self._merge_commits(range_spec))
+            )
+        return self._merge_commits(range_spec)
+
+    def _merge_commits(self, range_spec: str) -> list[str]:
         out = self.out("rev-list", "--merges", range_spec)
         return out.split() if out else []
 
+    def first_commit_matching(self, rev: str, pattern: str) -> str:
+        """``git log rev -n1 --format=%H -E --grep=pattern`` ("" if none); cached for a SHA."""
+
+        def compute() -> str:
+            return self.out("log", rev, "-n", "1", "--format=%H", "-E", f"--grep={pattern}")
+
+        if _OPTIMIZE and _is_sha(rev):
+            return str(self._immutable("grep", (rev, pattern), compute))
+        return compute()
+
     def commit_info(self, sha: str) -> CommitInfo:
+        if _OPTIMIZE and _is_sha(sha):
+            key, hit = self._memo("commit_info", sha)
+            if hit is None:
+                stored = disk_cache.active().get("commit", sha)
+                hit = _commit_from_json(stored) if stored is not None else None
+                if hit is None:
+                    hit = self._commit_info(sha)
+                    disk_cache.active().put("commit", _commit_to_json(hit), sha)
+                _MEMO[key] = hit
+            assert isinstance(hit, CommitInfo)  # noqa: S101
+            return hit
+        return self._commit_info(sha)
+
+    def _commit_info(self, sha: str) -> CommitInfo:
         fmt = "%H%x00%P%x00%an%x00%ae%x00%s%x00%B"
         raw = self.run("show", "-s", f"--format={fmt}", sha).stdout
         full, parents, an, ae, subject, body = raw.split("\x00", 5)
@@ -247,18 +620,123 @@ class Git:
         return tuple(files)
 
     def show_file(self, rev: str, path: str) -> str | None:
+        if _OPTIMIZE and _is_sha(rev) and "\n" not in path:
+            key, hit = self._memo("show_file", rev, path)
+            if hit is None:
+                try:
+                    reader = self._reader()
+                    if reader is None:  # no session: original path, still memoised
+                        content = self._show_file(rev, path)
+                        hit = ("", content) if content is not None else ("missing",)
+                    else:
+                        data = reader.read(f"{rev}:{path}")
+                        hit = ("", _text(data)) if data is not None else ("missing",)
+                except _NotABlob:  # e.g. a directory: git show prints a listing
+                    content = self._show_file(rev, path)
+                    hit = ("", content) if content is not None else ("missing",)
+                except _ReaderError as exc:
+                    # A failed read is never "missing": drop the reader and answer this
+                    # read through the original subprocess path (not memoised).
+                    log.warning("cat-file reader failed; using git show", extra={"note": str(exc)})
+                    self._drop_reader()
+                    return self._show_file(rev, path)
+                _MEMO[key] = hit
+            assert isinstance(hit, tuple)  # noqa: S101
+            return hit[1] if len(hit) == 2 else None
+        return self._show_file(rev, path)
+
+    def _show_file(self, rev: str, path: str) -> str | None:
         proc = self.run("show", f"{rev}:{path}", check=False)
         return proc.stdout if proc.returncode == 0 else None
 
+    def ls_files_at(self, rev: str) -> list[str]:
+        """``git ls-tree -r --name-only rev`` (memoised for a full commit SHA)."""
+        if _OPTIMIZE and _is_sha(rev):
+            listing = self._immutable(
+                "ls_tree", (rev,), lambda: self.out("ls-tree", "-r", "--name-only", rev)
+            )
+            return str(listing).splitlines()
+        return self.out("ls-tree", "-r", "--name-only", rev).splitlines()
+
     def unified_diff(self, sha: str, *, context: int = 0) -> str:
+        if _OPTIMIZE and _is_sha(sha):
+            key, hit = self._memo("diff", sha, str(context))
+            if hit is None:
+                hit = _MEMO[key] = self.out("show", "--format=", f"-U{context}", "--no-color", sha)
+            assert isinstance(hit, str)  # noqa: S101
+            return hit
         return self.out("show", "--format=", f"-U{context}", "--no-color", sha)
 
     def patch_id(self, sha: str) -> str:
+        """``git show | git patch-id --stable`` for any commit, merges included."""
+        if _OPTIMIZE and _is_sha(sha):
+            key, hit = self._memo("patch_id", sha)
+            if isinstance(hit, str):
+                return hit
+            stored = disk_cache.active().get("patch_id", sha)
+            value = stored if isinstance(stored, str) else self._patch_id(sha)
+            if not isinstance(stored, str):
+                disk_cache.active().put("patch_id", value, sha)
+            _MEMO[key] = value
+            return value
+        return self._patch_id(sha)
+
+    def _patch_id(self, sha: str) -> str:
         patch = self.run("show", "--no-color", sha).stdout
         out = self.run("patch-id", "--stable", stdin=patch).stdout.strip()
         return out.split()[0] if out else ""
 
+    def patch_ids(self, shas: list[str]) -> dict[str, str]:
+        """Patch-ids of many **non-merge** commits in two subprocesses (ADR-0016).
+
+        ``git log --no-walk=unsorted -p`` emits exactly what ``git show`` emits per commit,
+        and one ``git patch-id --stable`` reads the whole stream. Commits without a patch
+        (empty) get "" like ``patch_id``. Falls back to per-commit calls when disabled.
+        """
+        if not shas:
+            return {}
+        if not _OPTIMIZE or not all(_is_sha(sha) for sha in shas):
+            return {sha: self._patch_id(sha) for sha in shas}  # refs are never memoised
+        result: dict[str, str] = {}
+        missing = []
+        for sha in shas:
+            key, hit = self._memo("patch_id", sha)
+            if not isinstance(hit, str):
+                stored = disk_cache.active().get("patch_id", sha)
+                if isinstance(stored, str):
+                    hit = _MEMO[key] = stored
+            if isinstance(hit, str):
+                result[sha] = hit
+            else:
+                missing.append(sha)
+        if missing:
+            log_out = self.run(
+                "log",
+                "--no-walk=unsorted",
+                "--no-color",
+                "--no-decorate",
+                "-p",
+                "--stdin",
+                stdin="\n".join(missing) + "\n",
+            ).stdout
+            ids = self.run("patch-id", "--stable", stdin=log_out).stdout
+            found = {}
+            for line in ids.splitlines():
+                parts = line.split()
+                if len(parts) == 2:
+                    found[parts[1]] = parts[0]
+            for sha in missing:
+                result[sha] = _MEMO[(self._key, "patch_id", sha)] = found.get(sha, "")
+                disk_cache.active().put("patch_id", result[sha], sha)
+        return result
+
     def tags(self, pattern: str) -> list[str]:
+        if _SNAPSHOT is not None and self._key in _SNAPSHOT:
+            key, hit = self._memo("tags", pattern)
+            if hit is None:
+                hit = _MEMO[key] = self.out("tag", "--list", pattern)
+            assert isinstance(hit, str)  # noqa: S101
+            return hit.splitlines() if hit else []
         out = self.out("tag", "--list", pattern)
         return out.splitlines() if out else []
 
@@ -305,11 +783,18 @@ class Git:
 
     def ls_remote(self, remote: str, *patterns: str) -> list[tuple[str, str]]:
         """``(sha, ref)`` pairs advertised by the remote (read-only; transient errors retried)."""
-        out = retry(
-            lambda: self.out("ls-remote", remote, *patterns),
-            attempts=self.network_attempts,
-            sleep=self._sleep,
-        )
+        started = time.perf_counter()
+        try:
+            out = retry(
+                lambda: self.out("ls-remote", remote, *patterns),
+                attempts=self.network_attempts,
+                sleep=self._sleep,
+            )
+        finally:
+            elapsed = time.perf_counter() - started
+            NETWORK.calls += 1
+            NETWORK.seconds += elapsed
+            NETWORK.git_seconds += elapsed
         pairs = []
         for line in out.splitlines():
             sha, _, name = line.partition(chr(9))  # ls-remote separates with a tab
@@ -391,6 +876,9 @@ def extract_tar(data: bytes, dest: Path) -> None:
 
 def clone_no_checkout(source: Path, dest: Path) -> Git:
     """Read-only sandbox: clone into ``dest`` without touching ``source``."""
+    STATS.calls += 1
+    STATS.by_command["clone"] = STATS.by_command.get("clone", 0) + 1
+    started = time.perf_counter()
     proc = subprocess.run(
         [
             "git",
@@ -409,6 +897,7 @@ def clone_no_checkout(source: Path, dest: Path) -> Git:
         timeout=600,
         env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
     )
+    STATS.seconds += time.perf_counter() - started
     if proc.returncode != 0:
         raise GitError(f"Sandbox clone failed: {proc.stderr.strip()[:500]}")
     return Git(dest)

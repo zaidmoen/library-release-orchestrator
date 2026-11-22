@@ -23,6 +23,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from release_orchestrator.errors import IntegrationError
+from release_orchestrator.gitutil.repo import NETWORK
 from release_orchestrator.integrations.github import Transport, urllib_transport
 
 PERMISSION_RANK = {"none": 0, "read": 1, "triage": 2, "write": 3, "maintain": 4, "admin": 5}
@@ -163,12 +164,16 @@ class GitHubReader:
     def _get(self, path: str) -> Any:
         last = ""
         for attempt in range(1, self._attempts + 1):
+            started = time.perf_counter()
             try:
                 status, data = self._transport(
                     "GET", f"{self.api_url}{path}", self._headers(), None
                 )
             except IntegrationError as exc:  # network failure: transient
                 status, data, last = 0, None, exc.message
+            finally:
+                NETWORK.calls += 1
+                NETWORK.seconds += time.perf_counter() - started
             message = data.get("message", "") if isinstance(data, dict) else ""
             if status == 200:
                 return data

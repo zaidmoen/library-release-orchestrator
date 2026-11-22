@@ -22,11 +22,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from release_orchestrator import cache as disk_cache
 from release_orchestrator.analysis import python_symbols as pysym
 from release_orchestrator.analysis.graph import ChangeGraph
 from release_orchestrator.fsutil import temp_dir
 from release_orchestrator.gitutil.history import HistoryScan
-from release_orchestrator.gitutil.repo import Git, clone_no_checkout
+from release_orchestrator.gitutil.repo import Git, clone_no_checkout, optimizations_enabled
 from release_orchestrator.models import (
     ChangeUnit,
     CommitInfo,
@@ -140,9 +141,30 @@ class DependencyAnalyzer:
         if unit.key in self._cache:
             return self._cache[unit.key]
         eff = ChangeEffects(unit.key)
-        for commit in unit.commits:
-            self._collect(commit, eff)
+        if optimizations_enabled():
+            # ADR-0016: effects are a pure function of each commit's content, so they are
+            # computed once per commit (process memo + immutable disk cache) and merged in
+            # commit order, which is exactly what sequential _collect produces.
+            for commit in unit.commits:
+                _merge(eff, self._commit_effects(commit))
+        else:
+            for commit in unit.commits:
+                self._collect(commit, eff)
         self._cache[unit.key] = eff
+        return eff
+
+    def _commit_effects(self, commit: CommitInfo) -> ChangeEffects:
+        key = (str(self.git.path.resolve()), commit.sha, self.package_dir)
+        hit = _EFFECTS_MEMO.get(key)
+        if hit is not None:
+            return hit
+        stored = disk_cache.active().get("effects", commit.sha, self.package_dir)
+        eff = _effects_from_json(stored) if stored is not None else None
+        if eff is None:
+            eff = ChangeEffects("")
+            self._collect(commit, eff)
+            disk_cache.active().put("effects", _effects_to_json(eff), commit.sha, self.package_dir)
+        _EFFECTS_MEMO[key] = eff
         return eff
 
     def _collect(self, commit: CommitInfo, eff: ChangeEffects) -> None:
@@ -349,7 +371,7 @@ class DependencyAnalyzer:
             ordered = [
                 sha for sha in scan.commit_order() if any(sha in units[k].shas for k in requested)
             ]
-            probe_result = probe_apply(self.git.path, scan.base_sha, ordered)
+            probe_result = cached_probe(self.git.path, scan.base_sha, ordered)
             if not probe_result.applied_cleanly:
                 causes = sorted(
                     key
@@ -406,6 +428,104 @@ def probe_apply(repo: Path, base_sha: str, shas: Iterable[str]) -> ProbeResult:
             applied.append(sha)
             patch_ids[sha] = sandbox.patch_id("HEAD")
     return ProbeResult(True, applied, result_patch_ids=patch_ids)
+
+
+_EFFECTS_MEMO: dict[tuple[str, str, str], ChangeEffects] = {}
+_PROBE_MEMO: dict[tuple[str, ...], ProbeResult] = {}
+
+
+def _merge(into: ChangeEffects, part: ChangeEffects) -> None:
+    into.introduced |= part.introduced
+    into.modified |= part.modified
+    into.removed_public |= part.removed_public
+    into.new_modules |= part.new_modules
+    into.new_bindings |= part.new_bindings
+    into.references.extend(part.references)
+    into.parse_errors.extend(part.parse_errors)
+    for path in part.unverified_files:
+        if path not in into.unverified_files:
+            into.unverified_files.append(path)
+
+
+def _effects_to_json(e: ChangeEffects) -> dict[str, Any]:
+    return {
+        "introduced": sorted([m, n] for m, n in e.introduced),
+        "modified": sorted([m, n] for m, n in e.modified),
+        "removed_public": sorted([m, n] for m, n in e.removed_public),
+        "new_modules": sorted(e.new_modules),
+        "new_bindings": sorted([p, n] for p, n in e.new_bindings),
+        "references": [
+            [p, r.name, list(r.target) if r.target is not None else None, r.line]
+            for p, r in e.references
+        ],
+        "parse_errors": list(e.parse_errors),
+        "unverified_files": list(e.unverified_files),
+    }
+
+
+def _effects_from_json(d: Any) -> ChangeEffects | None:
+    try:
+        return ChangeEffects(
+            "",
+            introduced={(str(m), str(n)) for m, n in d["introduced"]},
+            modified={(str(m), str(n)) for m, n in d["modified"]},
+            removed_public={(str(m), str(n)) for m, n in d["removed_public"]},
+            new_modules={str(m) for m in d["new_modules"]},
+            new_bindings={(str(p), str(n)) for p, n in d["new_bindings"]},
+            references=[
+                (str(p), pysym.Reference(str(name), tuple(t) if t is not None else None, int(ln)))
+                for p, name, t, ln in d["references"]
+            ],
+            parse_errors=[str(x) for x in d["parse_errors"]],
+            unverified_files=[str(x) for x in d["unverified_files"]],
+        )
+    except (KeyError, TypeError, ValueError):
+        return None  # corrupted entry: recompute
+
+
+def cached_probe(repo: Path, base_sha: str, shas: list[str]) -> ProbeResult:
+    """``probe_apply`` is a pure function of (base, ordered commits): memo + disk cache."""
+    if not optimizations_enabled():
+        return probe_apply(repo, base_sha, shas)
+    key = (base_sha, *shas)
+    hit = _PROBE_MEMO.get(key)
+    if hit is not None:
+        return hit
+    stored = disk_cache.active().get("probe", *key)
+    result = None
+    if isinstance(stored, dict):
+        try:
+            result = ProbeResult(
+                bool(stored["applied_cleanly"]),
+                [str(s) for s in stored["applied"]],
+                stored["conflict_commit"],
+                [str(f) for f in stored["conflicted_files"]],
+                str(stored["message"]),
+                {str(k): str(v) for k, v in stored["result_patch_ids"].items()},
+            )
+        except (KeyError, TypeError, AttributeError):
+            result = None
+    if result is None:
+        result = probe_apply(repo, base_sha, shas)
+        disk_cache.active().put(
+            "probe",
+            {
+                "applied_cleanly": result.applied_cleanly,
+                "applied": result.applied,
+                "conflict_commit": result.conflict_commit,
+                "conflicted_files": result.conflicted_files,
+                "message": result.message,
+                "result_patch_ids": result.result_patch_ids,
+            },
+            *key,
+        )
+    _PROBE_MEMO[key] = result
+    return result
+
+
+def clear_analysis_memo() -> None:
+    _EFFECTS_MEMO.clear()
+    _PROBE_MEMO.clear()
 
 
 def _added_lines(diff: str) -> dict[str, set[int]]:
