@@ -127,3 +127,19 @@ nearest config (up to 3 parent directories) whose `library.repo` is the current 
 `--repository owner/name` overrides the GitHub identity when the remote can't provide it.
 Optional config keys: `pull_requests.snapshot` (PR snapshot file, labelled as such) and
 `dependency_sheet: {provider: csv, path, columns}`.
+
+## One-call assessment and caching (ADR-0016)
+
+| Command | Purpose | Exit codes |
+|---|---|---|
+| `assess [--pr N\|#N\|URL] [--ticket KEY] [--candidate TAG] [--order rcA,rcB] [--brief]` | the single read-only call behind `/library-release`: status card (READY / BLOCKED / NEEDS REVIEW / UNKNOWN), `why`, `next`, `decisions_needed`, `decision_log`, `freshness`, `timings` | 0 READY / NEEDS REVIEW, 3 BLOCKED, 5 UNKNOWN |
+| `cache clear` / `cache stats` | the immutable analysis cache under `<state_dir>/cache/v1` | 0 |
+
+Global flags:
+
+* `--no-cache` (or `LRO_NO_CACHE=1`) disables the disk cache.
+* `LRO_OPTIMIZE=0` runs the original, unoptimized code paths. The differential tests
+  prove both modes give identical results.
+
+The cache holds only facts fixed by commit SHAs. Refs, remote tags, PR reviews and checks,
+Jira, registry and environments are always read live.
