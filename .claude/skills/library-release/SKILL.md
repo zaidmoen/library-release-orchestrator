@@ -1,7 +1,7 @@
 ---
 name: library-release
 description: Plan and prepare a shared-library release in any order (e.g. release Change B before Change A), including release candidates. Analyzes which changes a release needs, detects code, textual and behavioural dependencies, proposes a SemVer/RC version, builds and validates an isolated release branch, pushes only to allowlisted sandbox remotes, prepares draft PRs for the library and affected consumers, and manages prep/stage/master promotion and rollback, never merging or deploying. Three interactive modes: release-candidate, release (finalize an RC) and reorder-releases (e.g. rc.23 before rc.22). Use when someone asks to release, cut, ship, promote, reorder or roll back a library version, RC or Jira ticket.
-argument-hint: "[--mode release-candidate|release|reorder-releases] [TICKET...] [#PR | PR-URL | --pr N] [--repository owner/name] [--candidate vX-rc.N] [--order rcA,rcB] [--dry-run] [--plan-only] [--config FILE]"
+argument-hint: "[#PR | PR-URL] [TICKET] [vX.Y.Z-rc.N] (all optional)"
 allowed-tools: Bash(python .claude/skills/library-release/scripts/lro.py *), Read
 ---
 
@@ -14,32 +14,43 @@ step successful unless its JSON says `"ok": true`.
 `LRO` means `python .claude/skills/library-release/scripts/lro.py` (put `--config <file>`
 first when the user gave one, and `intake.global_args` such as `--repository o/r`).
 
-## Start: context and source change (always, read-only)
+## Start: one call, one card (always, read-only)
 
-Run these before any mode or workflow step. The user should not have to name the
-repository, its path or both a PR and a ticket.
+The engineer types `/library-release`, `/library-release #15`, `/library-release FIN-211`,
+`/library-release FIN-211 #15` or `/library-release v1.1.0-rc.22`. No other argument is
+ever required.
 
-1. **Context.** `LRO context`. It finds the Git repository you're in, the GitHub
-   `owner/name` (from the remote), branch, HEAD, default branch, the config that describes
-   *this* repository, the latest stable tag and the RCs. Each value says where it came from.
-   If `problems[]` isn't empty, explain each one and ask only for its `needs` (for example
-   `--repository owner/name` or `--config <file>`). Never pick another repository or a
-   config for another library (`CONFIG_MISMATCH`).
-2. **Source change** (when the user gave a PR, a ticket, or nothing):
-   `LRO resolve-change <intake.resolve_args>`.
-   * `RESOLVED`: show the PR, its ticket(s), the Jira status and links, related PRs, the RCs
-     containing each ticket and the `prerequisites` (with their state and evidence).
-   * `NEEDS_INPUT`: ask `questions[]` with `AskUserQuestion` (scenario D lists the open PRs
-     targeting the default branch; never choose one yourself). Then rerun with the answer.
-   * `CONFLICT`: show `conflicts[]` (for example "PR #15 is about FIN-211, not FIN-204")
-     and ask which is right. Never resolve it yourself.
-   * Say whether PR data is live (`github-rest (live)`) or a snapshot (`fixture`).
-3. **Dependency graph** (when dependencies or ordering matter):
-   `LRO release-graph [--ticket K]... [--order rcA,rcB]`. Present `dependencies[]` with
-   their **classification** (CONFIRMED / INFERRED / UNKNOWN / BLOCKED) and `sources`,
-   `ancestry[]` separately (**ancestry is content, never a functional dependency**),
-   `overlaps[]` as heuristics, `anomalies[]`, `conflicts[]` and `recommended_order`.
-   INFERRED or UNKNOWN never makes anything READY.
+1. `LRO intake $ARGUMENTS`, then **one** call: `LRO <intake.global_args> assess
+   <intake.assess_args>`. It discovers the repository, branch, config, releases, the
+   PR ↔ ticket link and the dependencies, checking the change against **every**
+   unreleased change (declared in Jira or not), and returns a card.
+2. **Print `result.brief` verbatim** (≤ 8 lines: STATUS / WHY / NEXT). Add nothing else
+   unless asked. Answer in the engineer's language; keep keys, versions and commands as is.
+3. **Questions only when the engine asks:** if `decisions_needed[]` isn't empty and the
+   engineer wants to proceed, ask with `AskUserQuestion` using exactly those options
+   (`changes_scope: true` options are content decisions: say so; never pick one
+   yourself). An `UNKNOWN` card with a question (no PR given, PR without ticket, PR/ticket
+   conflict) needs the answer before anything else; rerun `assess` with it.
+4. **Follow-ups in natural language** (no buttons are assumed):
+
+   | Engineer says | You do |
+   |---|---|
+   | "why?" / "evidence" | show `why[]`, `review[]`, `graph.dependencies` (classification + sources), `decision_log[]` and `freshness` from the same payload; no new command |
+   | "show the dependency graph" | `LRO release-graph [--order …]` and present it |
+   | "include FIN-198" / an option from `decisions_needed` | continue with *Release modes* using that Q1 choice (preview → approval gate) |
+   | "validate" / "prepare" / any write | the *Workflow* gates: every `--approve` needs an explicit yes |
+   | "full report" / "Slack" | the preview, then `LRO release-report` (Slack text is never sent) |
+
+5. **Status meanings** (never upgrade them): 🔴 BLOCKED = a confirmed blocker;
+   ⚪ UNKNOWN = the change or a required fact can't be established; 🟡 NEEDS REVIEW =
+   nothing blocks but evidence is missing, suspected or stale; 🟢 READY = everything
+   required is present and fresh. Runtime behaviour isn't verified in this phase: never
+   claim it is.
+6. If `context.problems[]` asks for something (for example `--repository owner/name`
+   when the remote can't identify the repo), ask for exactly that and rerun.
+
+Internal commands (`context`, `resolve-change`, `release-graph`, `release-mode …`) remain
+for automation and debugging; the engineer never needs to know them.
 
 ## Release modes (interactive)
 

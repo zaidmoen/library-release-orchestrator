@@ -7,6 +7,7 @@ Logs go to stderr. Exit codes are stable (see ``errors.ExitCode`` and docs/cli.m
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import logging
 import os
@@ -16,6 +17,8 @@ from pathlib import Path
 from typing import Any
 
 from release_orchestrator import __version__
+from release_orchestrator import cache as disk_cache
+from release_orchestrator.assess import assess, render_brief
 from release_orchestrator.config import load_config
 from release_orchestrator.context import RepoContext, discover_context
 from release_orchestrator.demo import SCENARIOS, build_demo
@@ -27,6 +30,7 @@ from release_orchestrator.errors import (
     InvalidInputError,
     OrchestratorError,
 )
+from release_orchestrator.gitutil.repo import NETWORK, STATS, git_session, read_snapshot
 from release_orchestrator.integrations.dependency_sheet import SheetSnapshot, build_sheet
 from release_orchestrator.integrations.github_status import (
     ApprovalPolicy,
@@ -51,6 +55,8 @@ from release_orchestrator.reporting.release_report import (
 )
 from release_orchestrator.workflow import Orchestrator, RequestInput, Services, write_plan
 
+# Commands that never write to a repository ref, registry, environment or remote.
+READ_ONLY_COMMANDS = {"release-mode", "resolve-change", "release-graph", "release-report", "assess"}
 WRITE_COMMANDS = {"prepare", "pr", "publish", "update-consumers", "push", "promote", "rollback"}
 
 
@@ -99,6 +105,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--repository",
         dest="repository_override",
         help="GitHub owner/name override when it can't be discovered from the Git remote",
+    )
+    parser.add_argument(
+        "--no-cache", action="store_true", help="don't use the immutable analysis cache"
     )
     parser.add_argument("--json", action="store_true", help="emit a JSON envelope on stdout")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -225,6 +234,18 @@ def build_parser() -> argparse.ArgumentParser:
     rep.add_argument("--ticket", help="source Jira key")
     rep.add_argument("--out", type=Path, help="directory for report.md/json and slack.json/txt")
 
+    ass = sub.add_parser(
+        "assess", help="one-call release assessment for /library-release (read-only)"
+    )
+    ass.add_argument("--pr", help="PR number, #number or URL")
+    ass.add_argument("--ticket", help="Jira key")
+    ass.add_argument("--candidate", help="release tag/version to finalize, e.g. v1.1.0-rc.22")
+    ass.add_argument("--order", help="reorder: comma-separated candidates")
+    ass.add_argument("--brief", action="store_true", help="print the compact card (text mode)")
+
+    cache_cmd = sub.add_parser("cache", help="immutable analysis cache")
+    cache_cmd.add_argument("action", choices=["clear", "stats"])
+
     lab = sub.add_parser("lab-init", help="create the release lab (library + 2 consumers)")
     lab.add_argument("--dest", type=Path, required=True)
 
@@ -266,12 +287,24 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         return (ExitCode.OK if context.ok else ExitCode.AMBIGUOUS_OR_NOT_FOUND), context.to_dict()
 
     config = load_config(_config_path(args))
+    # ADR-0016: the immutable-analysis cache (never mutable state); --no-cache disables it.
+    disk_cache.configure(disk_cache.for_state_dir(config.state_dir, enabled=not args.no_cache))
+    if args.command == "cache":
+        active = disk_cache.for_state_dir(config.state_dir)
+        if args.action == "clear":
+            return ExitCode.OK, {"removed_entries": active.clear()}
+        return ExitCode.OK, active.stats()
     orch = Orchestrator(Services.from_config(config))
 
-    if args.command == "release-mode":
-        return _release_mode(orch, args)
-    if args.command in ("resolve-change", "release-graph", "release-report"):
-        return _discovery_command(orch, args)
+    if args.command in READ_ONLY_COMMANDS:
+        # Refs of the user's repositories are resolved once for this read-only run.
+        repos = [config.library.repo, *(c.repo for c in config.consumers)]
+        with read_snapshot(repos):
+            if args.command == "release-mode":
+                return _release_mode(orch, args)
+            if args.command == "assess":
+                return _assess(orch, args)
+            return _discovery_command(orch, args)
 
     if args.command in ("env-status", "promote", "rollback-plan", "rollback"):
         ledger = EnvironmentLedger(config, orch.s.registry)
@@ -379,10 +412,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     except SystemExit as exc:  # argparse usage errors -> INVALID_INPUT
         return int(ExitCode.INVALID_INPUT) if exc.code not in (0, None) else 0
     _configure_logging(args.verbose, args.log_json)
+    reconfigure = getattr(sys.stdout, "reconfigure", None)
+    if reconfigure is not None:  # cards use emoji; Windows consoles default to cp1252
+        with contextlib.suppress(ValueError, OSError):
+            reconfigure(encoding="utf-8", errors="replace")
     error: dict[str, Any] | None = None
     result: dict[str, Any] = {}
     try:
-        code, result = run(args)
+        with git_session():  # every cat-file reader is closed when the command ends
+            code, result = run(args)
     except OrchestratorError as exc:
         code, error = exc.exit_code, exc.to_dict()
     except Exception as exc:
@@ -398,6 +436,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     if args.json:
         print(json.dumps(envelope, indent=2, default=str))
+    elif args.command == "assess" and getattr(args, "brief", False) and result and not error:
+        print(render_brief(result), end="")
     else:
         print(_text_summary(args.command, envelope))
     return int(code)
@@ -500,7 +540,9 @@ def _config_path(args: argparse.Namespace) -> Path:
     local = Path("release-orchestrator.yaml")
     if local.is_file():
         return local
+    # No network here: locating the config only needs local Git (ADR-0016).
     context, config = discover_context(Path.cwd(), repository=args.repository_override)
+    args.discovered_context = context  # reused by the same read-only run (no second scan)
     if config is None:
         problems = [p.to_dict() for p in context.problems]
         raise ConfigError(
@@ -511,6 +553,14 @@ def _config_path(args: argparse.Namespace) -> Path:
 
 
 def _context_for(orch: Orchestrator, args: argparse.Namespace) -> RepoContext:
+    cached: RepoContext | None = getattr(args, "discovered_context", None)
+    needs_remote_default = getattr(args, "pr", None) is None  # open-PR lookups need it
+    if (
+        cached is not None
+        and cached.config_path == str(orch.config.config_path)
+        and (not needs_remote_default or cached.default_branch_source.startswith("git"))
+    ):
+        return cached
     context, _ = discover_context(
         orch.config.library.repo,
         config_path=orch.config.config_path,
@@ -596,3 +646,34 @@ def _discovery_command(
         result["files"] = {name: str(args.out / name) for name in files}
     code = ExitCode.BLOCKED if report["eligibility"] == "BLOCKED" else ExitCode.OK
     return code, result
+
+
+def _assess(orch: Orchestrator, args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    """The single call behind ``/library-release`` (ADR-0016)."""
+    engine = ModeEngine(orch)
+    context = _context_for(orch, args)
+    payload = assess(
+        engine,
+        context,
+        pulls=_pull_source(orch, context),
+        pr=args.pr,
+        ticket=args.ticket,
+        candidate=args.candidate,
+        order=_split(args.order),
+        sheet=_sheet(orch.config),
+    )
+    payload["cache"] = disk_cache.active().stats()
+    payload["process"] = {  # whole process, including config/context discovery
+        "git_subprocess_calls": STATS.calls,
+        "git_seconds": round(STATS.seconds - NETWORK.git_seconds, 3),
+        "network_calls": NETWORK.calls,
+        "network_seconds": round(NETWORK.seconds, 3),
+    }
+    payload["brief"] = render_brief(payload)
+    code = {
+        "READY": ExitCode.OK,
+        "NEEDS REVIEW": ExitCode.OK,
+        "BLOCKED": ExitCode.BLOCKED,
+        "UNKNOWN": ExitCode.AMBIGUOUS_OR_NOT_FOUND,
+    }[payload["status"]]
+    return code, payload

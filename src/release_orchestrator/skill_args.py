@@ -15,6 +15,7 @@ from release_orchestrator.errors import InvalidInputError
 
 _KEY = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 _SHA = re.compile(r"^[0-9a-f]{7,40}$")
+_RELEASE_TAG = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$")
 _PR = re.compile(r"^(#\d{1,9}|https://[^/\s]+/[^/\s]+/[^/\s]+/pull/\d{1,9}/?)$")
 _BOOL_FLAGS = {"--dry-run": "dry_run", "--plan-only": "plan_only"}
 _VALUE_FLAGS = {
@@ -32,7 +33,7 @@ RELEASE_MODES = ("release-candidate", "release", "reorder-releases")
 
 @dataclass
 class SkillIntake:
-    mode: str  # ticket | pr | commits | text | ask
+    mode: str  # ticket | pr | release | commits | text | ask
     tickets: list[str] = field(default_factory=list)
     release_mode: str | None = None  # release-candidate | release | reorder-releases
     candidate: str | None = None
@@ -70,7 +71,17 @@ class SkillIntake:
         data["mode_args"] = self.mode_args()
         data["resolve_args"] = self.resolve_args()
         data["global_args"] = ["--repository", self.repository] if self.repository else []
+        data["assess_args"] = self.assess_args()
         return data
+
+    def assess_args(self) -> list[str]:
+        """Arguments for the single ``assess`` call behind ``/library-release`` (ADR-0016)."""
+        args = list(self.resolve_args())
+        if self.candidate:
+            args += ["--candidate", self.candidate]
+        if self.order:
+            args += ["--order", self.order]
+        return args
 
     def resolve_args(self) -> list[str]:
         """Arguments for ``resolve-change`` (PR and/or the single ticket given)."""
@@ -117,6 +128,8 @@ def parse_skill_arguments(raw: str) -> SkillIntake:
             )
         elif _PR.match(token) and intake.pr is None:
             intake.pr = token
+        elif _RELEASE_TAG.match(token) and intake.candidate is None:
+            intake.candidate = token  # e.g. /library-release v1.1.0-rc.22
         else:
             words.append(token)
         i += 1
@@ -130,6 +143,8 @@ def parse_skill_arguments(raw: str) -> SkillIntake:
     if not words:
         if intake.pr is not None:
             intake.mode = "pr"
+        elif intake.candidate is not None:
+            intake.mode = "release"
         return intake
     if all(_KEY.match(w) for w in words):
         intake.mode, intake.tickets = "ticket", words
