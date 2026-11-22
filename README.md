@@ -158,19 +158,41 @@ are classified CONFIRMED / INFERRED / UNKNOWN / BLOCKED. See
 ## Claude Code Skill
 
 The Skill lives in [.claude/skills/library-release/](.claude/skills/library-release/SKILL.md).
-Open Claude Code in the library repository (or a directory with a
-`release-orchestrator.yaml`) and run:
+Open Claude Code inside the library repository (or one with a discoverable
+`release-orchestrator.yaml`). The entry point is always `/library-release`;
+arguments are optional:
 
+```text
+/library-release
+/library-release #15
+/library-release https://github.com/owner/library/pull/15
+/library-release FIN-211
+/library-release FIN-211 #15
+/library-release v1.1.0-rc.22
 ```
+
+Claude runs deterministic argument intake followed by **one read-only `assess` engine call**.
+The default reply is a **≤ 8-line** STATUS / WHY / NEXT card (READY / BLOCKED /
+NEEDS REVIEW / UNKNOWN); use "why?" to expand evidence from the same result without
+re-running the analysis. The engine, not Claude, decides release correctness.
+Including prerequisites or changing release content is never selected silently.
+
+Existing workflow inputs still work, for example:
+
+```text
 /library-release FIN-204
 /library-release FIN-204 --dry-run
 /library-release "Release Change B before Change A"
 /library-release FIN-204 --plan-only
 ```
 
-Claude parses the arguments deterministically (`scripts/lro.py intake`), calls the CLI,
-explains findings, and **asks before every write step**. It can't override a `BLOCKED`
-result, and it never pushes, merges or deploys.
+Additional read-only details (graph, impact preview, report and unsent Slack text)
+are available on request. Every actual write remains behind an explicit
+`--approve` gate; the Skill cannot override BLOCKED and never merges or deploys.
+
+For the team walkthrough and real-library prerequisites, see
+[the live demo guide](docs/live-demo.md). For measured cold/warm timing, Git calls,
+and correctness comparisons, see [Phase 1 performance](docs/performance.md).
 
 ## Configuration
 
