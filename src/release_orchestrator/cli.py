@@ -19,8 +19,17 @@ from typing import Any
 from release_orchestrator import __version__
 from release_orchestrator import cache as disk_cache
 from release_orchestrator.assess import assess, render_brief
-from release_orchestrator.config import load_config
-from release_orchestrator.context import RepoContext, discover_context
+from release_orchestrator.bootstrap import Bootstrap, bootstrap, trust_validation
+from release_orchestrator.branch_plan import parse_bases, plan_branches
+from release_orchestrator.config import Config, load_config
+from release_orchestrator.consumers.impact import impact_matrix
+from release_orchestrator.consumers.readme_discovery import discover_consumers
+from release_orchestrator.context import (
+    RepoContext,
+    discover_context,
+    parse_remote,
+    validate_repository,
+)
 from release_orchestrator.demo import SCENARIOS, build_demo
 from release_orchestrator.environments import EnvironmentLedger
 from release_orchestrator.errors import (
@@ -30,7 +39,7 @@ from release_orchestrator.errors import (
     InvalidInputError,
     OrchestratorError,
 )
-from release_orchestrator.gitutil.repo import NETWORK, STATS, git_session, read_snapshot
+from release_orchestrator.gitutil.repo import NETWORK, STATS, Git, git_session, read_snapshot
 from release_orchestrator.integrations.dependency_sheet import SheetSnapshot, build_sheet
 from release_orchestrator.integrations.github_status import (
     ApprovalPolicy,
@@ -43,10 +52,18 @@ from release_orchestrator.integrations.linkage import (
     PullSource,
     SnapshotPullSource,
 )
+from release_orchestrator.integrations.mcp_snapshot import KINDS as MCP_KINDS
+from release_orchestrator.integrations.mcp_snapshot import McpPullSource, McpStore
 from release_orchestrator.lab import build_lab
 from release_orchestrator.modes import MODES, ModeEngine, render_preview
 from release_orchestrator.planning.manifest import load_plan
 from release_orchestrator.release_graph import build_release_graph
+from release_orchestrator.reporting.release_notes import (
+    GitHubReleaseWriter,
+    build_notes,
+    publish_notes,
+    render_notes,
+)
 from release_orchestrator.reporting.release_report import (
     build_report,
     render_markdown,
@@ -56,7 +73,20 @@ from release_orchestrator.reporting.release_report import (
 from release_orchestrator.workflow import Orchestrator, RequestInput, Services, write_plan
 
 # Commands that never write to a repository ref, registry, environment or remote.
-READ_ONLY_COMMANDS = {"release-mode", "resolve-change", "release-graph", "release-report", "assess"}
+READ_ONLY_COMMANDS = {
+    "release-mode",
+    "resolve-change",
+    "release-graph",
+    "release-report",
+    "assess",
+    "bootstrap",
+    "consumers",
+    "impact",
+    "branch-plan",
+    "release-notes",
+}
+# ADR-0017 commands (read-only except the explicit, local mcp-ingest store)
+MCP_COMMANDS = {"bootstrap", "consumers", "impact", "branch-plan", "release-notes"}
 WRITE_COMMANDS = {"prepare", "pr", "publish", "update-consumers", "push", "promote", "rollback"}
 
 
@@ -157,6 +187,12 @@ def build_parser() -> argparse.ArgumentParser:
                 default=[],
                 help="restrict the operation to these services (repeatable)",
             )
+            p.add_argument(
+                "--base",
+                action="append",
+                default=[],
+                help="confirmed target branch per service: <service>=<branch> (repeatable)",
+            )
 
     lin = sub.add_parser("verify-lineage", help="final release == approved RC except version file")
     lin.add_argument("--plan", type=Path, required=True)
@@ -246,6 +282,36 @@ def build_parser() -> argparse.ArgumentParser:
     cache_cmd = sub.add_parser("cache", help="immutable analysis cache")
     cache_cmd.add_argument("action", choices=["clear", "stats"])
 
+    ing = sub.add_parser("mcp-ingest", help="store GitHub/Jira MCP tool output as evidence")
+    ing.add_argument("--kind", required=True, choices=list(MCP_KINDS))
+    ing.add_argument("--repository", help="owner/name (GitHub kinds)")
+    ing.add_argument("--key", default="", help="file path for github-file")
+    ing.add_argument("--tool", default="", help="the MCP tool that produced the payload")
+    ing.add_argument("--from", dest="source", type=Path, required=True, help="JSON file or -")
+
+    sub.add_parser("bootstrap", help="show the runtime config (derived or from YAML)")
+    tv = sub.add_parser("trust-validation", help="confirm a validation command (local, gated)")
+    tv.add_argument("--scope", required=True, help="'library' or a consumer service name")
+    tv.add_argument("--name", required=True)
+    tv.add_argument("--env", action="append", default=[], help="KEY=VALUE (repeatable)")
+    tv.add_argument("--approve", action="store_true")
+    tv.add_argument("argv", nargs=argparse.REMAINDER, help="-- the command and its arguments")
+    cons = sub.add_parser("consumers", help="README-first consumer discovery (read-only)")
+    cons.add_argument("--add", action="append", default=[], help="extra repo name or URL")
+    for name, help_text in (
+        ("impact", "consumer impact matrix for a plan (read-only)"),
+        ("branch-plan", "branch/PR strategy per repository (read-only)"),
+        ("release-notes", "draft GitHub Release notes from the plan's content (read-only)"),
+    ):
+        p = sub.add_parser(name, help=help_text)
+        p.add_argument("--plan", type=Path, required=True)
+        p.add_argument("--consumer", action="append", default=[], help="selected services")
+        p.add_argument("--out", type=Path, help="write markdown (release-notes) here")
+    pub = sub.add_parser("publish-release-notes", help="create/update the DRAFT GitHub Release")
+    pub.add_argument("--plan", type=Path, required=True)
+    pub.add_argument("--github-repository", required=True, help="owner/name of the library")
+    pub.add_argument("--approve", action="store_true")
+
     lab = sub.add_parser("lab-init", help="create the release lab (library + 2 consumers)")
     lab.add_argument("--dest", type=Path, required=True)
 
@@ -277,6 +343,21 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
     if args.command == "lab-init":
         return ExitCode.OK, {"config": str(build_lab(args.dest))}
 
+    if args.command == "mcp-ingest":
+        return _mcp_ingest(args)
+    if args.command == "trust-validation":
+        config = _load_config(args)
+        argv = args.argv[1:] if args.argv[:1] == ["--"] else args.argv
+        env = dict(item.split("=", 1) for item in args.env if "=" in item)
+        return ExitCode.OK, trust_validation(
+            config.state_dir,
+            scope=args.scope,
+            name=args.name,
+            argv=argv,
+            env=env,
+            approve=args.approve,
+        )
+
     if args.command == "context":
         context, _ = discover_context(
             args.path or Path.cwd(),
@@ -286,7 +367,7 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
         )
         return (ExitCode.OK if context.ok else ExitCode.AMBIGUOUS_OR_NOT_FOUND), context.to_dict()
 
-    config = load_config(_config_path(args))
+    config = _load_config(args)
     # ADR-0016: the immutable-analysis cache (never mutable state); --no-cache disables it.
     disk_cache.configure(disk_cache.for_state_dir(config.state_dir, enabled=not args.no_cache))
     if args.command == "cache":
@@ -304,7 +385,11 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
                 return _release_mode(orch, args)
             if args.command == "assess":
                 return _assess(orch, args)
+            if args.command in MCP_COMMANDS:
+                return _mcp_command(orch, args)
             return _discovery_command(orch, args)
+    if args.command == "publish-release-notes":
+        return _publish_notes(orch, args)
 
     if args.command in ("env-status", "promote", "rollback-plan", "rollback"):
         ledger = EnvironmentLedger(config, orch.s.registry)
@@ -381,6 +466,7 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             approve=args.approve,
             dry_run=args.dry_run,
             only=tuple(args.consumer) if args.consumer else None,
+            bases=parse_bases(args.base),
         )
     if args.command == "push":
         return ExitCode.OK, orch.push(plan, approve=args.approve)
@@ -552,7 +638,44 @@ def _config_path(args: argparse.Namespace) -> Path:
     return config.config_path
 
 
+def _load_config(args: argparse.Namespace) -> Config:
+    """Explicit or discovered YAML (legacy, always wins), else the derived runtime config
+    of the library repository the command runs in (ADR-0017)."""
+    explicit = _explicit_config(args)
+    if explicit is not None:
+        return load_config(explicit)
+    local = Path("release-orchestrator.yaml")
+    if local.is_file():
+        return load_config(local)
+    context, config = discover_context(Path.cwd(), repository=args.repository_override)
+    args.discovered_context = context
+    if config is not None:
+        return config
+    if context.root is None or any(p.code == "CONFIG_MISMATCH" for p in context.problems):
+        problems = [p.to_dict() for p in context.problems]
+        raise ConfigError(
+            "No release config describes this repository and it can't be derived here",
+            details={"problems": problems, "searched_from": context.cwd},
+        )
+    boot = bootstrap(
+        Path(context.root),
+        own_repository=context.repository,
+        extra_consumers=getattr(args, "add", None) or [],
+    )
+    args.bootstrap = boot
+    _apply_bootstrap(context, boot)
+    return boot.config
+
+
+def _apply_bootstrap(context: RepoContext, boot: Bootstrap) -> None:
+    context.config_path = str(boot.config.config_path)
+    context.config_source = "derived from the repository (see runtime-config.json)"
+    context.library = boot.config.library.name
+    context.problems = [p for p in context.problems if p.code != "CONFIG_NOT_FOUND"]
+
+
 def _context_for(orch: Orchestrator, args: argparse.Namespace) -> RepoContext:
+    boot: Bootstrap | None = getattr(args, "bootstrap", None)
     cached: RepoContext | None = getattr(args, "discovered_context", None)
     needs_remote_default = getattr(args, "pr", None) is None  # open-PR lookups need it
     if (
@@ -563,14 +686,21 @@ def _context_for(orch: Orchestrator, args: argparse.Namespace) -> RepoContext:
         return cached
     context, _ = discover_context(
         orch.config.library.repo,
-        config_path=orch.config.config_path,
+        config_path=None if boot is not None else orch.config.config_path,
         repository=args.repository_override,
         reader=orch.s.github,
     )
+    if boot is not None:
+        _apply_bootstrap(context, boot)
     return context
 
 
 def _pull_source(orch: Orchestrator, context: RepoContext) -> PullSource | None:
+    """Preferred: fresh GitHub MCP evidence; then a configured snapshot; then REST."""
+    if context.repository:
+        snap = McpStore(orch.config.state_dir / "mcp").get("github-pulls", context.repository)
+        if snap is not None and snap.age_minutes() <= 30:
+            return McpPullSource(snap)
     if orch.config.pull_request_snapshot is not None:
         return SnapshotPullSource(orch.config.pull_request_snapshot)
     if context.repository and context.host == "github.com":
@@ -677,3 +807,147 @@ def _assess(orch: Orchestrator, args: argparse.Namespace) -> tuple[ExitCode, dic
         "UNKNOWN": ExitCode.AMBIGUOUS_OR_NOT_FOUND,
     }[payload["status"]]
     return code, payload
+
+
+# --------------------------------------------------------------------------- ADR-0017
+def _mcp_ingest(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    """Validate and store one MCP tool payload (local evidence store only)."""
+    config = _load_config(args)
+    raw = sys.stdin.read() if str(args.source) == "-" else args.source.read_text(encoding="utf-8")
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError:
+        payload = raw  # get_file_contents may hand over plain text
+    snap = McpStore(config.state_dir / "mcp").ingest(
+        args.kind, payload, repository=args.repository, key=args.key, tool=args.tool
+    )
+    summary = (
+        snap.data
+        if args.kind == "jira-issue"
+        else {"records": (len(snap.data) if isinstance(snap.data, list) else 1)}
+    )
+    return ExitCode.OK, {
+        "kind": snap.kind,
+        "repository": snap.repository,
+        "key": snap.key,
+        "fetched_at": snap.fetched_at,
+        "summary": summary,
+    }
+
+
+def _repositories(orch: Orchestrator, context: RepoContext) -> dict[str, str]:
+    """Service -> owner/name from the consumers' origin remotes (for MCP evidence)."""
+    out: dict[str, str] = dict(orch.config.github_repositories)
+    if context.repository:
+        out.setdefault(orch.config.library.name, context.repository)
+    for consumer in orch.config.consumers:
+        try:
+            parsed = parse_remote(Git(consumer.repo).remote_url(orch.config.remote_name))
+        except OrchestratorError:
+            parsed = None
+        if parsed:
+            out.setdefault(consumer.name, parsed[1])
+    return out
+
+
+def _discovery(orch: Orchestrator, args: argparse.Namespace, context: RepoContext) -> Any:
+    boot: Bootstrap | None = getattr(args, "bootstrap", None)
+    if boot is not None and not getattr(args, "add", None):
+        return boot.discovery
+    top = orch.config.library.package_dir.strip("/").rsplit("/", 1)[-1]
+    return discover_consumers(
+        orch.config.library.repo,
+        library=orch.config.library.name,
+        top_package=top,
+        own_repository=context.repository,
+        workspace=[orch.config.library.repo.parent],
+        store=McpStore(orch.config.state_dir / "mcp"),
+        extra=getattr(args, "add", None) or [],
+    )
+
+
+def _mcp_command(orch: Orchestrator, args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    context = _context_for(orch, args)
+    if args.command == "bootstrap":
+        boot: Bootstrap | None = getattr(args, "bootstrap", None)
+        if boot is None:
+            return ExitCode.OK, {
+                "source": f"YAML ({orch.config.config_path})",
+                "note": "an explicit config is used as-is; nothing was derived",
+                "context": context.to_dict(),
+            }
+        return ExitCode.OK, {"source": "derived", **boot.to_dict(), "context": context.to_dict()}
+    if args.command == "consumers":
+        result = _discovery(orch, args, context)
+        return ExitCode.OK, result.to_dict()
+    plan = load_plan(args.plan, orch.config)
+    run = orch.status(plan)
+    repos = _repositories(orch, context)
+    if args.command == "impact":
+        matrix = impact_matrix(
+            plan,
+            orch.s.git,
+            repositories=repos,
+            discovery=_discovery(orch, args, context),
+            run_steps=run.steps,
+        )
+        return ExitCode.OK, matrix
+    if args.command == "branch-plan":
+        return ExitCode.OK, plan_branches(
+            plan,
+            orch.config,
+            selected=args.consumer or None,
+            store=McpStore(orch.config.state_dir / "mcp"),
+            repositories=repos,
+        )
+    pulls = _pull_source(orch, context)
+    notes = build_notes(
+        plan,
+        orch.s.git,
+        tag_prefix=orch.config.library.tag_prefix,
+        tracker=orch.s.tracker,
+        pulls=pulls.list(state="all") if pulls is not None else [],
+        impact=impact_matrix(
+            plan, orch.s.git, repositories=repos, discovery=None, run_steps=run.steps
+        ),
+        run_steps=run.steps,
+        key_pattern=orch.config.change_key_pattern,
+    )
+    markdown = render_notes(notes, library=orch.config.library.name)
+    if args.out:
+        args.out.write_text(markdown, encoding="utf-8")
+    return ExitCode.OK, {
+        "notes": notes,
+        "markdown": markdown,
+        "pull_request_source": pulls.source if pulls is not None else "unavailable",
+        "status": "draft (not published)",
+    }
+
+
+def _publish_notes(orch: Orchestrator, args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    plan = load_plan(args.plan, orch.config)
+    run = orch.status(plan)
+    context = _context_for(orch, args)
+    pulls = _pull_source(orch, context)
+    notes = build_notes(
+        plan,
+        orch.s.git,
+        tag_prefix=orch.config.library.tag_prefix,
+        tracker=orch.s.tracker,
+        pulls=pulls.list(state="all") if pulls is not None else [],
+        impact=None,
+        run_steps=run.steps,
+        key_pattern=orch.config.change_key_pattern,
+    )
+    result = publish_notes(
+        plan,
+        orch.s.git,
+        notes_markdown=render_notes(notes, library=orch.config.library.name),
+        repository=validate_repository(args.github_repository),
+        tag=notes["tag"],
+        run_steps=run.steps,
+        remote=orch.config.remote_name,
+        approve=args.approve,
+        writer=GitHubReleaseWriter(api_url=orch.config.github_api_url),
+    )
+    return ExitCode.OK, result

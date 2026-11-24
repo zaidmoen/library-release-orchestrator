@@ -40,6 +40,7 @@ from release_orchestrator.integrations.jira import (
     IssueTracker,
     NullIssueTracker,
 )
+from release_orchestrator.integrations.mcp_snapshot import McpIssueTracker, McpStore
 from release_orchestrator.integrations.pr_reconcile import reconcile
 from release_orchestrator.integrations.pull_requests import (
     ExternalPullRequestProvider,
@@ -114,6 +115,13 @@ class Services:
             if config.issue_tracker_fixture
             else NullIssueTracker()
         )
+        # ADR-0017: live Jira evidence ingested from the Jira MCP tools wins over the
+        # fixture for the issues it covers; staleness is reported, never hidden.
+        mcp = McpStore(config.state_dir / "mcp")
+        if mcp.all("jira-issue"):
+            tracker = McpIssueTracker(
+                mcp, tracker, max_age_minutes=config.issue_max_age_minutes or 30
+            )
         prs: PullRequestProvider
         if config.pr_provider == "github":
             prs = GitHubPullRequestProvider(
@@ -415,8 +423,12 @@ class Orchestrator:
         approve: bool,
         dry_run: bool,
         only: tuple[str, ...] | None = None,
+        bases: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         """Prepare dependency bumps for targeted consumers.
+
+        ``bases`` maps a service to its engineer-confirmed target branch (see
+        ``branch-plan``); the update branch is created from it and its PR targets it.
 
         ``only`` restricts the *operation* to the services the user selected. It never
         hides analysis: unselected targets are reported under ``not_updated``.
@@ -437,6 +449,12 @@ class Orchestrator:
         if only is not None and set(only) - known:
             raise InvalidInputError(
                 f"Unknown consumer(s) {sorted(set(only) - known)}", details={"known": sorted(known)}
+            )
+        bases = bases or {}
+        if set(bases) - known:
+            raise InvalidInputError(
+                f"--base for unknown consumer(s) {sorted(set(bases) - known)}",
+                details={"known": sorted(known)},
             )
         targets = [
             c
@@ -464,6 +482,7 @@ class Orchestrator:
                         change_keys=plan.included_keys,
                         library_dir=library_dir,
                         dry_run=dry_run,
+                        base_ref=bases.get(consumer.name),
                     ),
                 ).to_dict()
                 if (
@@ -475,7 +494,7 @@ class Orchestrator:
                     spec = PullRequestSpec(
                         repository=consumer.name,
                         head=update["branch"],
-                        base=consumer.source_ref,
+                        base=bases.get(consumer.name, consumer.source_ref),
                         title=f"Bump {plan.library} to {plan.proposed_version}",
                         body=consumer_pr_body(plan, consumer.name, update),
                     )

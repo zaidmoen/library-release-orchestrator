@@ -15,6 +15,7 @@ from release_orchestrator.errors import InvalidInputError
 LIBRARY_DIR = "harri-release-lab-library"
 PAYMENT_DIR = "harri-release-lab-payment"
 INVOICE_DIR = "harri-release-lab-invoice"
+REPORTING_DIR = "harri-release-lab-reporting"
 GITHUB_OWNER = "zaidmoen"
 
 PEOPLE = {
@@ -281,6 +282,37 @@ BILLING = """from zaidlibrary.invoices import format_invoice, invoice_due_date
 def bill(number, total, issued):
     return f"{format_invoice(number, total)} due {invoice_due_date(issued).isoformat()}"
 """
+LIBRARY_README = """# zaidlibrary
+
+Fictional shared library for the release lab.
+
+## Consumers
+
+Services that depend on this package (keep this list current: `/library-release` reads it
+first to find who may need a dependency update):
+
+- `harri-release-lab-payment` - checkout (payments)
+- `harri-release-lab-invoice` - billing (invoices)
+- `harri-release-lab-reporting` - finance reports (tax)
+"""
+
+REPORT = """from zaidlibrary.tax import tax_for
+
+
+def vat_line(amount, region):
+    return f"VAT {region}: {tax_for(amount, region)}"
+"""
+
+TEST_REPORT = """import unittest
+
+from reporting_service.report import vat_line
+
+
+class ReportTest(unittest.TestCase):
+    def test_vat_line(self):
+        self.assertTrue(vat_line("100.00", "JO").startswith("VAT JO:"))
+"""
+
 TEST_BILLING = """import unittest
 
 from invoice_service.billing import bill
@@ -413,7 +445,7 @@ def build_lab(dest: Path, *, provider: str = "local") -> Path:
     lib.write(
         {
             "pyproject.toml": PYPROJECT,
-            "README.md": "# zaidlibrary\n\nFictional shared library for the release lab.\n",
+            "README.md": LIBRARY_README,
             "src/zaidlibrary/__init__.py": INIT,
             "src/zaidlibrary/payments.py": PAYMENTS,
             "src/zaidlibrary/tax.py": TAX,
@@ -496,6 +528,13 @@ def build_lab(dest: Path, *, provider: str = "local") -> Path:
             ("billing.py", BILLING),
             ("test_billing.py", TEST_BILLING),
             "Fictional invoice service.",
+        ),
+        (
+            REPORTING_DIR,  # listed in the library README, not in the YAML config
+            "reporting_service",
+            ("report.py", REPORT),
+            ("test_report.py", TEST_REPORT),
+            "Fictional finance reporting service.",
         ),
     ):
         repo = _Repo(dest / directory)

@@ -143,3 +143,20 @@ Global flags:
 
 The cache holds only facts fixed by commit SHAs. Refs, remote tags, PR reviews and checks,
 Jira, registry and environments are always read live.
+
+## MCP evidence, config-free start, consumers, branches, release notes (ADR-0017)
+
+| Command | Purpose | Writes |
+|---|---|---|
+| `bootstrap` | show the runtime config (derived, or the YAML in use) with provenance and open questions | audit copy in `.git/lro-state` only |
+| `trust-validation --scope library\|<svc> --name N [--env K=V] --approve -- <argv>` | confirm a validation command (validated like YAML) | `.git/lro-state/trusted-validation.json` |
+| `mcp-ingest --kind K [--repository o/r] [--key path] [--tool T] --from FILE\|-` | validate and store GitHub/Jira MCP output | `<state>/mcp` |
+| `consumers [--add name-or-url]` | README-first discovery with verification | none |
+| `impact --plan P` | consumer impact matrix | none |
+| `branch-plan --plan P [--consumer svc]` | branch/PR strategy per repository | none |
+| `release-notes --plan P [--out notes.md]` | draft notes from the shipped commits | the `--out` file |
+| `publish-release-notes --plan P --github-repository o/r --approve` | create/update the **draft** GitHub Release (gated) | GitHub (draft only) |
+| `update-consumers ... --base <svc>=<branch>` | use the confirmed target branch | as before (gated) |
+
+Kinds: `github-pulls`, `github-branches`, `github-tags`, `github-file`,
+`github-code-search`, `jira-issue`.

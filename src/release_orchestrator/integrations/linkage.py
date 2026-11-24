@@ -163,6 +163,21 @@ class ChangeResolver:
         self.git, self.pattern, self.pulls = git, key_pattern, pulls
         self.tracker, self.disc = tracker, discovery
         self.repository, self.default_branch = repository, default_branch
+        self._out: dict[str, Any] = {}
+
+    def _list(self, *, state: str, base: str | None = None) -> list[PullSummary] | None:
+        """PR listing that degrades: an unreachable source is reported, never fatal, and
+        never read as "no PRs" (ADR-0017, Scenario K)."""
+        if self.pulls is None:
+            return None
+        try:
+            return self.pulls.list(state=state, base=base)
+        except OrchestratorError as exc:
+            note = f"PR evidence unavailable: {exc.message}"
+            if self._out and note not in self._out["warnings"]:
+                self._out["warnings"].append(note)
+                self._out["sources"]["pull_requests"] = f"unavailable ({exc.code})"
+            return None
 
     # ------------------------------------------------------------------ entry point
     def resolve(self, *, pr: str | None = None, ticket: str | None = None) -> dict[str, Any]:
@@ -186,6 +201,7 @@ class ChangeResolver:
                 else f"issue snapshot (fetched_at {self.tracker.fetched_at()})",
             },
         }
+        self._out = out
         if ticket is not None and not re.fullmatch(self.pattern, ticket):
             raise InvalidInputError(f"{ticket!r} doesn't match the change-key pattern")
         pull = self._load_pull(pr, out) if pr is not None else None
@@ -292,22 +308,15 @@ class ChangeResolver:
         return pull
 
     def _search(self, key: str) -> list[dict[str, Any]]:
-        if self.pulls is None:
-            return []
-        try:
-            pulls = self.pulls.list(state="all")
-        except OrchestratorError:
+        pulls = self._list(state="all")
+        if pulls is None:
             return []
         views = [_pull_view(p, self.pattern) for p in pulls]
         return [v for v in views if key in v["tickets"]]
 
     def _open_without_ticket(self) -> list[dict[str, Any]]:
-        if self.pulls is None:
-            return []
-        views = [
-            _pull_view(p, self.pattern)
-            for p in self.pulls.list(state="open", base=self.default_branch)
-        ]
+        pulls = self._list(state="open", base=self.default_branch)
+        views = [_pull_view(p, self.pattern) for p in pulls or []]
         return [v for v in views if not v["tickets"]]
 
     def _released_in(self, key: str) -> str | None:
@@ -388,13 +397,12 @@ class ChangeResolver:
         }
 
     def _discover_open(self, out: dict[str, Any]) -> None:
-        if self.pulls is None:
-            self._ask(out, "ticket", "Which ticket or PR should be released?", [])
+        pulls = self._list(state="open", base=self.default_branch)
+        if pulls is None:
+            reason = "" if self.pulls is None else " (the PR list couldn't be read)"
+            self._ask(out, "ticket", f"Which ticket or PR should be released?{reason}", [])
             return
-        views = [
-            _pull_view(p, self.pattern)
-            for p in self.pulls.list(state="open", base=self.default_branch)
-        ]
+        views = [_pull_view(p, self.pattern) for p in pulls]
         out["candidates"] = views
         if not views:
             self._ask(

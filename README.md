@@ -155,6 +155,23 @@ are classified CONFIRMED / INFERRED / UNKNOWN / BLOCKED. See
 [ADR-0015](docs/adr/0015-discovery-and-dependency-intelligence.md) and the
 [live demo guide](docs/live-demo.md).
 
+### Works in any library repository (ADR-0017)
+
+Open Claude Code inside a shared library and run `/library-release`: no YAML required.
+The engine:
+* derives its runtime config (validated like YAML, with the source of every value);
+* reads the README to find consumer services and verifies them against their manifests;
+* uses GitHub and Jira MCP evidence when available;
+* proposes branch and PR strategies;
+* drafts GitHub Release notes from the commits that actually ship.
+
+Two things stay human decisions: a validation command (confirmed once with
+`trust-validation`), and every write (each behind `--approve`). Published release tags
+are immutable: a reorder creates a new candidate.
+
+See [docs/engineering-guide.md](docs/engineering-guide.md) and
+[ADR-0017](docs/adr/0017-mcp-native-config-free-release.md).
+
 ## Claude Code Skill
 
 The Skill lives in [.claude/skills/library-release/](.claude/skills/library-release/SKILL.md).

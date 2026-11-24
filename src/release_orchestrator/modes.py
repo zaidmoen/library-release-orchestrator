@@ -88,6 +88,9 @@ class Step:
     candidate: str | None = None
     blockers: list[dict[str, Any]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # Reorder (ADR-0017): the *new* immutable candidate tag allocated for this content.
+    # Existing candidate tags are never moved, deleted or re-used.
+    new_candidate: str | None = None
 
 
 @dataclass
@@ -108,6 +111,7 @@ class Option:
                 "tickets": s.keys,
                 "version": s.version,
                 "status": s.status,
+                "new_candidate": s.new_candidate,
             }
             for n, s in enumerate(self.steps, 1)
         ]
@@ -596,6 +600,17 @@ class ModeEngine:
                         f"{tag} targets {rc.major}.{rc.minor}.{rc.patch} but would "
                         f"release as {version}; re-cut the candidate"
                     )
+                if not released:  # the next release: a new candidate, never a renamed one
+                    rc_plan, _ = self._plan(sorted(new), base, source, "rc")
+                    if rc_plan is not None:
+                        step.new_candidate = (
+                            f"{self.config.library.tag_prefix}{rc_plan.proposed_version}"
+                        )
+                        if step.new_candidate != tag:
+                            step.warnings.append(
+                                f"a new candidate {step.new_candidate} would be cut from {base} "
+                                f"with {', '.join(sorted(new))}; {tag} stays as it is"
+                            )
             released |= set(new)
             steps.append(step)
         ok = all(s.status not in ("BLOCKED", "SKIPPED") for s in steps)
@@ -778,6 +793,7 @@ class ModeEngine:
                     "version": s["version"],
                     "status": s["status"],
                     "plan_id": s["plan_id"],
+                    "new_candidate": s.get("new_candidate"),
                 }
                 for n, s in enumerate(steps, 1)
             ],

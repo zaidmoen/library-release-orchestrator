@@ -68,7 +68,11 @@ def prepare_consumer_update(
     change_keys: list[str],
     library_dir: Path,
     dry_run: bool,
+    base_ref: str | None = None,
 ) -> ConsumerUpdateResult:
+    """``base_ref``: the engineer-confirmed target branch (default: the consumer's source
+    branch). The update branch is always new and created from it; no existing branch is
+    ever modified."""
     git = Git(consumer.repo)
     branch = branch_name(consumer, library, to_version)
     git.check_branch_name(branch)
@@ -87,7 +91,8 @@ def prepare_consumer_update(
         result.validation = _validate(git, result.head, consumer, library_dir)
         return result
 
-    base = git.rev_parse(consumer.source_ref)
+    base = git.rev_parse(base_ref or consumer.source_ref)
+    result.notes.append(f"based on {base_ref or consumer.source_ref} at {base[:10]}")
     message = (
         f"build(deps): bump {library} from {from_version} to {to_version}\n\n"
         f"Refs: {', '.join(change_keys)}\n"
