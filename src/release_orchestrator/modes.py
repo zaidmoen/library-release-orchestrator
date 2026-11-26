@@ -91,6 +91,12 @@ class Step:
     # Reorder (ADR-0017): the *new* immutable candidate tag allocated for this content.
     # Existing candidate tags are never moved, deleted or re-used.
     new_candidate: str | None = None
+    # ADR-0018: the whole sequence is explicit and independently verifiable.
+    uses_candidate: str | None = None  # an existing candidate whose content is exactly this
+    cut_from: str | None = None  # the stable tag the new candidate is cut from
+    expected_stable: str | None = None  # the stable tag this step should end as
+    excluded: list[str] = field(default_factory=list)  # in the candidate, not in this step
+    candidate_sha: str | None = None  # the original candidate tag's commit (must not move)
 
 
 @dataclass
@@ -112,6 +118,10 @@ class Option:
                 "version": s.version,
                 "status": s.status,
                 "new_candidate": s.new_candidate,
+                "uses_candidate": s.uses_candidate,
+                "cut_from": s.cut_from,
+                "expected_stable": s.expected_stable,
+                "excluded": s.excluded,
             }
             for n, s in enumerate(self.steps, 1)
         ]
@@ -492,14 +502,27 @@ class ModeEngine:
                 )
             ]
         source = self.config.library.source_ref
-        if not all(self.git.is_ancestor(c.sha, self.git.rev_parse(source)) for c in cands.values()):
+        source_sha = self.git.rev_parse(source)
+        divergent = [t for t, c in cands.items() if not self.git.is_ancestor(c.sha, source_sha)]
+        if divergent:
+            # ADR-0018: divergent candidate branches are reported, never guessed. Correct
+            # reordering needs one linear history to separate each candidate's own changes.
             return [
                 Option(
                     "unsupported",
-                    "Ordering can't be analysed",
+                    "Ordering can't be analysed (divergent candidates)",
                     f"Some candidates are not on {source}; ordering analysis needs them "
                     "on the source branch.",
                     False,
+                    evidence=[
+                        f"{t} ({cands[t].sha[:12]}) is not an ancestor of {source} "
+                        f"({source_sha[:12]}): DIVERGENT_CANDIDATE"
+                        for t in sorted(divergent)
+                    ]
+                    + [
+                        "Unsupported: reorder needs every pending candidate on the source "
+                        "branch. Merge or re-cut the divergent candidate, then re-run."
+                    ],
                 )
             ]
         ancestry = sorted(
@@ -544,6 +567,9 @@ class ModeEngine:
         released: set[str] = set()
         steps: list[Step] = []
         version = SemVer.parse(disc["latest_stable"]["version"])
+        taken: set[str] = set()  # candidate tags allocated earlier in this sequence
+        prefix = self.config.library.tag_prefix
+        unchanged = True  # every earlier step re-used its existing candidate
         for tag in order:
             cand = cands[tag]
             if steps and steps[-1].status == "BLOCKED":
@@ -590,6 +616,8 @@ class ModeEngine:
             )
             # The step ships only its new keys; earlier steps' keys are already in the base.
             step.keys = sorted(new)
+            # Shown even when blocked: what the candidate has that this step leaves out.
+            step.excluded = sorted(set(cand.keys) - set(new) - released)
             if step.status == "PLAN_READY":
                 rc = SemVer.parse(cand.version)
                 stable = SemVer.parse(disc["latest_stable"]["version"])
@@ -600,17 +628,39 @@ class ModeEngine:
                         f"{tag} targets {rc.major}.{rc.minor}.{rc.patch} but would "
                         f"release as {version}; re-cut the candidate"
                     )
-                if not released:  # the next release: a new candidate, never a renamed one
+                step.candidate_sha = cand.sha
+                step.expected_stable = f"{prefix}{version}"
+                previous = steps[-1].expected_stable if steps else None
+                step.cut_from = previous or base
+                exact = (
+                    unchanged
+                    and set(cand.keys) == released | set(new)
+                    and (version.major, version.minor, version.patch)
+                    == (rc.major, rc.minor, rc.patch)
+                )
+                if exact:
+                    # The existing candidate is exactly this content: release it as is.
+                    step.uses_candidate = tag
+                elif not released:  # the next release: a new candidate, never a renamed one
+                    unchanged = False
                     rc_plan, _ = self._plan(sorted(new), base, source, "rc")
                     if rc_plan is not None:
-                        step.new_candidate = (
-                            f"{self.config.library.tag_prefix}{rc_plan.proposed_version}"
-                        )
+                        step.new_candidate = f"{prefix}{rc_plan.proposed_version}"
+                        taken.add(step.new_candidate)
                         if step.new_candidate != tag:
                             step.warnings.append(
                                 f"a new candidate {step.new_candidate} would be cut from {base} "
                                 f"with {', '.join(sorted(new))}; {tag} stays as it is"
                             )
+                else:
+                    unchanged = False
+                    step.new_candidate = self._next_candidate(version, taken)
+                    taken.add(step.new_candidate)
+                    step.warnings.append(
+                        f"after {step.cut_from} is released, a new candidate "
+                        f"{step.new_candidate} is cut from it with {', '.join(sorted(new))}; "
+                        f"{tag} stays as it is"
+                    )
             released |= set(new)
             steps.append(step)
         ok = all(s.status not in ("BLOCKED", "SKIPPED") for s in steps)
@@ -794,6 +844,11 @@ class ModeEngine:
                     "status": s["status"],
                     "plan_id": s["plan_id"],
                     "new_candidate": s.get("new_candidate"),
+                    "uses_candidate": s.get("uses_candidate"),
+                    "cut_from": s.get("cut_from"),
+                    "expected_stable": s.get("expected_stable"),
+                    "excluded": s.get("excluded", []),
+                    "candidate_sha": s.get("candidate_sha"),
                 }
                 for n, s in enumerate(steps, 1)
             ],
@@ -864,6 +919,82 @@ class ModeEngine:
         return {"fresh": True, "fingerprint": current, "preview_id": preview.get("preview_id")}
 
     # ------------------------------------------------------------------ helpers
+    def _next_candidate(self, version: SemVer, taken: set[str]) -> str:
+        """The next free ``-rc.N`` for ``version``: above every existing tag and every tag
+        already allocated in this sequence (tags are never re-used)."""
+        core = f"{self.config.library.tag_prefix}{version.major}.{version.minor}.{version.patch}"
+        used = [0]
+        for t in [*self.git.tags(f"{core}-rc.*"), *taken]:
+            tail = t[len(core) + 4 :] if t.startswith(f"{core}-rc.") else ""
+            if tail.isdigit():
+                used.append(int(tail))
+        return f"{core}-rc.{max(used) + 1}"
+
+    def progress(self, preview: dict[str, Any]) -> dict[str, Any]:
+        """Re-discover the repository and verify a reordered sequence step by step.
+
+        Read-only. A step is DONE only when its expected stable tag exists, contains its
+        changes and none of a later step's; the original candidate tags must still point
+        where they did. Any surprise is DRIFT: stop and re-plan.
+        """
+        steps = preview.get("release_steps") or []
+        if not steps:
+            raise InvalidInputError("the preview has no release steps")
+        disc = self.discover()
+        stable = disc["latest_stable"]["tag"]
+        rows: list[dict[str, Any]] = []
+        problems: list[str] = []
+        start = preview.get("latest_stable") or {}
+        prev: str | None = start.get("tag") if isinstance(start, dict) else None
+        step_keys = [set(s.get("tickets") or []) for s in steps]
+        next_found = False
+        for n, step in enumerate(steps):
+            row: dict[str, Any] = {
+                "step": n + 1,
+                "tickets": step.get("tickets"),
+                "expected_stable": step.get("expected_stable"),
+                "candidate": step.get("candidate"),
+                "new_candidate": step.get("new_candidate"),
+                "uses_candidate": step.get("uses_candidate"),
+            }
+            sha, cand = step.get("candidate_sha"), step.get("candidate")
+            if sha and cand and self.git.try_rev_parse(f"refs/tags/{cand}^{{commit}}") != sha:
+                problems.append(f"candidate tag {cand} no longer points to {sha[:12]}")
+            target = step.get("expected_stable")
+            exists = bool(target) and self.git.try_rev_parse(f"refs/tags/{target}") is not None
+            if exists and not next_found and prev:
+                shipped = set(self._scan(prev, target).changes)
+                later: set[str] = set().union(*step_keys[n + 1 :])
+                missing, extra = step_keys[n] - shipped, shipped & later
+                row["status"] = "DRIFT" if (missing or extra) else "DONE"
+                if missing or extra:
+                    problems.append(
+                        f"{target} does not match step {n + 1}: missing {sorted(missing)}, "
+                        f"unexpected {sorted(extra)}"
+                    )
+                prev = target
+            elif not next_found:
+                next_found = True
+                row["status"] = "NEXT"
+                if prev and stable != prev:
+                    row["status"] = "DRIFT"
+                    problems.append(
+                        f"latest stable is {stable}, but step {n + 1} expects to build on {prev}"
+                    )
+            else:
+                row["status"] = "PENDING"
+            rows.append(row)
+        done = all(r["status"] == "DONE" for r in rows)
+        return {
+            "sequence": rows,
+            "latest_stable": stable,
+            "complete": done and not problems,
+            "status": "DRIFT" if problems else ("COMPLETE" if done else "IN_PROGRESS"),
+            "problems": problems,
+            "note": "Plan each next step again with 'release-mode options/preview' against the "
+            "current state; a step is never executed from a stale preview.",
+        }
+
     def _scan(self, base: str, source: str) -> HistoryScan:
         if not optimizations_enabled():
             return scan_history(

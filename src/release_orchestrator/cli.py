@@ -56,6 +56,8 @@ from release_orchestrator.integrations.mcp_snapshot import KINDS as MCP_KINDS
 from release_orchestrator.integrations.mcp_snapshot import McpPullSource, McpStore
 from release_orchestrator.lab import build_lab
 from release_orchestrator.modes import MODES, ModeEngine, render_preview
+from release_orchestrator.notify import Notifier, load_policy, resolve_channel, set_policy
+from release_orchestrator.operations import OperationStore, render_report
 from release_orchestrator.planning.manifest import load_plan
 from release_orchestrator.release_graph import build_release_graph
 from release_orchestrator.reporting.release_notes import (
@@ -202,7 +204,9 @@ def build_parser() -> argparse.ArgumentParser:
         "release-mode",
         help="interactive release modes: discovery, Q1 options, impact preview (read-only)",
     )
-    rm.add_argument("action", choices=["discover", "options", "preview", "check-preview"])
+    rm.add_argument(
+        "action", choices=["discover", "options", "preview", "check-preview", "progress"]
+    )
     rm.add_argument("--mode", choices=list(MODES))
     rm.add_argument("--ticket", action="append", default=[], help="release-candidate scope")
     rm.add_argument("--candidate", help="release mode: candidate tag/version to finalize")
@@ -312,6 +316,33 @@ def build_parser() -> argparse.ArgumentParser:
     pub.add_argument("--github-repository", required=True, help="owner/name of the library")
     pub.add_argument("--approve", action="store_true")
 
+    # ADR-0018: operations (correlation IDs, engine-backed events, audit) and Slack outbox
+    op = sub.add_parser("op", help="release operation: start, actor, event, report, list")
+    op.add_argument("action", choices=["start", "actor", "event", "report", "list"])
+    op.add_argument("--op", dest="op_id", help="operation id")
+    op.add_argument("--kind", choices=["create-rc", "release", "reorder"])
+    op.add_argument("--order", help="requested order (reorder)")
+    op.add_argument("--ticket", action="append", default=[])
+    op.add_argument("--repository", dest="op_repository", help="owner/name of the library")
+    op.add_argument("--allow-concurrent", action="store_true")
+    op.add_argument("--event")
+    op.add_argument("--evidence", type=Path, help="engine JSON output that shows the event")
+    op.add_argument("--step", help="APPROVAL_GRANTED: what the engineer approved")
+    op.add_argument("--note", default="")
+    op.add_argument("--from", dest="source", type=Path, help="identity payload (MCP result)")
+    op.add_argument("--tool", help="MCP tool that produced --from")
+    op.add_argument("--out", type=Path, help="report: write Markdown here")
+    nt = sub.add_parser("notify", help="Slack (via MCP): channel, policy, plan, record, reconcile")
+    nt.add_argument("action", choices=["channel", "policy", "plan", "record", "reconcile"])
+    nt.add_argument("--op", dest="op_id")
+    nt.add_argument("--event")
+    nt.add_argument("--from", dest="source", type=Path, help="MCP result file")
+    nt.add_argument("--name", default="library-release-orchestrator")
+    nt.add_argument("--enable", action="store_true")
+    nt.add_argument("--disable", action="store_true")
+    nt.add_argument("--events", help="comma-separated events for the policy")
+    nt.add_argument("--approve", action="store_true")
+
     lab = sub.add_parser("lab-init", help="create the release lab (library + 2 consumers)")
     lab.add_argument("--dest", type=Path, required=True)
 
@@ -358,6 +389,9 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             approve=args.approve,
         )
 
+    if args.command == "notify" and args.action in ("channel", "policy"):
+        return _notify_policy(args)
+
     if args.command == "context":
         context, _ = discover_context(
             args.path or Path.cwd(),
@@ -390,6 +424,8 @@ def run(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
             return _discovery_command(orch, args)
     if args.command == "publish-release-notes":
         return _publish_notes(orch, args)
+    if args.command in ("op", "notify"):
+        return _operations(orch, args)
 
     if args.command in ("env-status", "promote", "rollback-plan", "rollback"):
         ledger = EnvironmentLedger(config, orch.s.registry)
@@ -584,6 +620,11 @@ def _release_mode(orch: Orchestrator, args: argparse.Namespace) -> tuple[ExitCod
             raise InvalidInputError("check-preview needs --preview FILE")
         preview = json.loads(args.preview.read_text(encoding="utf-8"))
         return ExitCode.OK, engine.check_preview(preview)
+    if args.action == "progress":
+        if not args.preview:
+            raise InvalidInputError("progress needs --preview FILE")
+        result = engine.progress(json.loads(args.preview.read_text(encoding="utf-8")))
+        return (ExitCode.BLOCKED if result["status"] == "DRIFT" else ExitCode.OK), result
     if not args.mode:
         raise InvalidInputError("--mode is required for options and preview")
     common = {
@@ -951,3 +992,80 @@ def _publish_notes(orch: Orchestrator, args: argparse.Namespace) -> tuple[ExitCo
         writer=GitHubReleaseWriter(api_url=orch.config.github_api_url),
     )
     return ExitCode.OK, result
+
+
+# --------------------------------------------------------------------------- operations (ADR-0018)
+def _read_source(args: argparse.Namespace) -> str:
+    if args.source is None:
+        raise InvalidInputError("--from FILE (the MCP tool result) is required")
+    return str(args.source.read_text(encoding="utf-8"))
+
+
+def _notify_policy(args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    if args.action == "channel":
+        return ExitCode.OK, resolve_channel(_read_source(args), args.name)
+    if not (args.enable or args.disable):
+        return ExitCode.OK, load_policy()
+    channel = resolve_channel(_read_source(args), args.name) if args.enable else None
+    return ExitCode.OK, set_policy(
+        channel=channel,
+        enable=args.enable,
+        events=_split(args.events),
+        approve=args.approve,
+    )
+
+
+def _engine_identity() -> dict[str, Any]:
+    from release_orchestrator import __version__
+
+    return {
+        "version": __version__,
+        "revision": os.environ.get("LRO_ENGINE_REVISION", "development checkout"),
+    }
+
+
+def _operations(orch: Orchestrator, args: argparse.Namespace) -> tuple[ExitCode, dict[str, Any]]:
+    store = OperationStore(orch.config.state_dir)
+    if args.command == "notify":
+        if not (args.op_id and (args.event or args.action == "reconcile")):
+            raise InvalidInputError("notify plan/record need --op and --event; reconcile --op")
+        notifier = Notifier(store)
+        if args.action == "plan":
+            return ExitCode.OK, notifier.plan(args.op_id, args.event)
+        if args.action == "record":
+            return ExitCode.OK, notifier.record(args.op_id, args.event, _read_source(args))
+        return ExitCode.OK, notifier.reconcile(args.op_id, _read_source(args))
+    if args.action == "list":
+        return ExitCode.OK, {"active": store.active(orch.config.library.name)}
+    if args.action == "start":
+        if not args.kind:
+            raise InvalidInputError("op start needs --kind")
+        request = {"order": _split(args.order) or [], "tickets": args.ticket}
+        return ExitCode.OK, store.start(
+            kind=args.kind,
+            library=orch.config.library.name,
+            repository=args.op_repository,
+            request=request,
+            engine=_engine_identity(),
+            allow_concurrent=args.allow_concurrent,
+        )
+    if not args.op_id:
+        raise InvalidInputError(f"op {args.action} needs --op")
+    if args.action == "actor":
+        return ExitCode.OK, store.set_actor(
+            args.op_id, _read_source(args), args.tool or "unspecified MCP tool"
+        )
+    if args.action == "event":
+        if not args.event:
+            raise InvalidInputError("op event needs --event")
+        return ExitCode.OK, store.record(
+            args.op_id,
+            args.event,
+            evidence=args.evidence,
+            note=args.note,
+            approved_step=args.step,
+        )
+    report = store.report(args.op_id)
+    if args.out:
+        args.out.write_text(render_report(report), encoding="utf-8")
+    return ExitCode.OK, report
