@@ -100,3 +100,10 @@ class InvalidTransitionError(OrchestratorError):
 class IntegrationError(OrchestratorError):
     code = "INTEGRATION_ERROR"
     exit_code = ExitCode.OPERATION_FAILED
+
+
+class ConcurrentModificationError(OrchestratorError):
+    """Another process changed the same run; reload and retry (optimistic concurrency)."""
+
+    code = "CONCURRENT_MODIFICATION"
+    exit_code = ExitCode.OPERATION_FAILED

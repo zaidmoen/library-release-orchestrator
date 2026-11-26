@@ -15,7 +15,11 @@ from release_orchestrator.consumers.discovery import assess_consumer
 from release_orchestrator.errors import BlockedError, ConfigError, NotFoundError
 from release_orchestrator.gitutil.history import HistoryScan
 from release_orchestrator.gitutil.repo import Git
-from release_orchestrator.integrations.jira import IssueTracker
+from release_orchestrator.integrations.jira import (
+    EligibilityPolicy,
+    IssueTracker,
+    check_eligibility,
+)
 from release_orchestrator.models import Severity, Verdict
 from release_orchestrator.planning.manifest import expected_validation
 from release_orchestrator.planning.plan import (
@@ -63,6 +67,7 @@ def build_plan(
     request: ResolvedRequest,
     tracker: IssueTracker,
     registry: PackageRegistry,
+    prerelease: str | None = None,
 ) -> tuple[ReleasePlan, AnalysisResult]:
     requested = list(request.change_keys)
     pending = [k for k in requested if k in scan.changes]
@@ -78,6 +83,11 @@ def build_plan(
         raise BlockedError(
             f"Nothing to release: {', '.join(released)} already present in {scan.base_ref}",
             reason="NOTHING_TO_RELEASE",
+            details={
+                "released_in": scan.base_ref,
+                "released_in_revision": scan.base_sha,
+                "source_commits": {k: scan.already_released.get(k, []) for k in released},
+            },
         )
 
     analyzer = DependencyAnalyzer(git, config.library.package_dir)
@@ -122,6 +132,7 @@ def build_plan(
         published=registry.list_versions(config.library.name),
         tagged=tagged_versions(config, git),
         api_removals=analysis.api_removals,
+        prerelease=prerelease,
     )
 
     affected = _affected_modules(units, pending, config.library.package_dir)
@@ -154,6 +165,20 @@ def build_plan(
         }
         for f in analysis.blockers
     ]
+    issue_policy = EligibilityPolicy(
+        config.issue_release_statuses, config.issue_resolved_statuses, config.issue_max_age_minutes
+    )
+    released_keys = set(scan.already_released) | set(released)
+    for finding in check_eligibility(tracker, pending, released=released_keys, policy=issue_policy):
+        blockers.append(
+            {
+                "reason": finding.reason,
+                "message": finding.message,
+                "change": finding.key,
+                "depends_on": finding.details.get("blocker"),
+                "source": "issue-tracker",
+            }
+        )
     if decision.collides:
         blockers.append({"reason": "VERSION_COLLISION", "message": "; ".join(decision.collisions)})
     if not config.library_validation:
@@ -167,6 +192,15 @@ def build_plan(
     risks = [f.message for f in analysis.findings if f.severity is Severity.WARNING]
     if unknown_consumers:
         risks.append(f"Ticket names unknown consumers (ignored): {unknown_consumers}")
+    for key in pending:
+        issue = tracker.get(key)
+        code_deps = {d for d in analysis.graph.dependencies(key) if d in scan.changes}
+        if issue is not None and code_deps - set(issue.blocked_by):
+            missing = sorted(code_deps - set(issue.blocked_by))
+            risks.append(
+                f"{key}: code depends on {missing} but the issue tracker has no "
+                "'blocked by' link (traceability gap)"
+            )
     if decision.bump.value == "major":
         risks.append("Major version: consumers must review breaking changes before upgrading")
     risks += [

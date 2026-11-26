@@ -33,6 +33,8 @@ class PublishedArtifact:
 
 
 class PackageRegistry(Protocol):
+    artifact_kind: str  # "source-tar" (local) | "wheel" (PEP 503 index)
+
     def list_versions(self, name: str) -> list[SemVer]: ...
 
     def get(self, name: str, version: SemVer) -> PublishedArtifact | None: ...
@@ -52,6 +54,8 @@ class LocalRegistry:
     It does **not** provide cross-machine coordination; production registries must give
     the same create-if-absent guarantee (PyPI/Artifactory/CodeArtifact do).
     """
+
+    artifact_kind = "source-tar"
 
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
@@ -120,3 +124,16 @@ class LocalRegistry:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(body)
         return PublishedArtifact(name, str(version), digest, metadata), True
+
+
+def build_registry(config: Any) -> PackageRegistry:
+    """Registry from the trusted config (``registry.provider``: local | pypi)."""
+    if config.registry_provider == "pypi":
+        from release_orchestrator.versioning.pypi import PypiRegistry
+
+        return PypiRegistry(
+            config.registry_url,
+            username_env=config.registry_username_env,
+            password_env=config.registry_password_env,
+        )
+    return LocalRegistry(config.registry_path)

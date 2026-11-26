@@ -15,14 +15,29 @@ from release_orchestrator.errors import InvalidInputError
 
 _KEY = re.compile(r"^[A-Z][A-Z0-9]+-\d+$")
 _SHA = re.compile(r"^[0-9a-f]{7,40}$")
+_RELEASE_TAG = re.compile(r"^v?\d+\.\d+\.\d+(?:-[0-9A-Za-z.]+)?$")
+_PR = re.compile(r"^(#\d{1,9}|https://[^/\s]+/[^/\s]+/[^/\s]+/pull/\d{1,9}/?)$")
 _BOOL_FLAGS = {"--dry-run": "dry_run", "--plan-only": "plan_only"}
-_VALUE_FLAGS = {"--base": "base", "--source": "source", "--config": "config"}
+_VALUE_FLAGS = {
+    "--base": "base",
+    "--source": "source",
+    "--config": "config",
+    "--mode": "release_mode",
+    "--candidate": "candidate",
+    "--order": "order",
+    "--pr": "pr",
+    "--repository": "repository",
+}
+RELEASE_MODES = ("release-candidate", "release", "reorder-releases")
 
 
 @dataclass
 class SkillIntake:
-    mode: str  # ticket | commits | text | ask
+    mode: str  # ticket | pr | release | commits | text | ask
     tickets: list[str] = field(default_factory=list)
+    release_mode: str | None = None  # release-candidate | release | reorder-releases
+    candidate: str | None = None
+    order: str | None = None  # comma-separated candidates
     commits: list[str] = field(default_factory=list)
     text: str | None = None
     dry_run: bool = False
@@ -30,6 +45,8 @@ class SkillIntake:
     base: str | None = None
     source: str | None = None
     config: str | None = None
+    pr: str | None = None  # PR number/#number/URL (ADR-0015: one reference is enough)
+    repository: str | None = None  # owner/name override when discovery can't tell
 
     def cli_request_args(self) -> list[str]:
         args: list[str] = []
@@ -51,7 +68,41 @@ class SkillIntake:
         data = asdict(self)
         data["max_step"] = "plan" if self.plan_only else ("dry-run" if self.dry_run else "full")
         data["plan_args"] = self.cli_request_args()
+        data["mode_args"] = self.mode_args()
+        data["resolve_args"] = self.resolve_args()
+        data["global_args"] = ["--repository", self.repository] if self.repository else []
+        data["assess_args"] = self.assess_args()
         return data
+
+    def assess_args(self) -> list[str]:
+        """Arguments for the single ``assess`` call behind ``/library-release`` (ADR-0016)."""
+        args = list(self.resolve_args())
+        if self.candidate:
+            args += ["--candidate", self.candidate]
+        if self.order:
+            args += ["--order", self.order]
+        return args
+
+    def resolve_args(self) -> list[str]:
+        """Arguments for ``resolve-change`` (PR and/or the single ticket given)."""
+        args: list[str] = []
+        if self.pr:
+            args += ["--pr", self.pr]
+        if len(self.tickets) == 1:
+            args += ["--ticket", self.tickets[0]]
+        return args
+
+    def mode_args(self) -> list[str]:
+        """Arguments for ``release-mode options|preview`` when a release mode was given."""
+        if not self.release_mode:
+            return []
+        args = ["--mode", self.release_mode]
+        args += [a for t in self.tickets for a in ("--ticket", t)]
+        if self.candidate:
+            args += ["--candidate", self.candidate]
+        if self.order:
+            args += ["--order", self.order]
+        return args
 
 
 def parse_skill_arguments(raw: str) -> SkillIntake:
@@ -75,11 +126,25 @@ def parse_skill_arguments(raw: str) -> SkillIntake:
             raise InvalidInputError(
                 f"Unknown option {token}", details={"known": sorted([*_BOOL_FLAGS, *_VALUE_FLAGS])}
             )
+        elif _PR.match(token) and intake.pr is None:
+            intake.pr = token
+        elif _RELEASE_TAG.match(token) and intake.candidate is None:
+            intake.candidate = token  # e.g. /library-release v1.1.0-rc.22
         else:
             words.append(token)
         i += 1
 
+    if intake.release_mode is not None and intake.release_mode not in RELEASE_MODES:
+        raise InvalidInputError(
+            f"Unknown release mode {intake.release_mode!r}", details={"modes": RELEASE_MODES}
+        )
+    if intake.pr is not None and not _PR.match(intake.pr) and not intake.pr.isdigit():
+        raise InvalidInputError(f"--pr must be a number, #number or PR URL, got {intake.pr!r}")
     if not words:
+        if intake.pr is not None:
+            intake.mode = "pr"
+        elif intake.candidate is not None:
+            intake.mode = "release"
         return intake
     if all(_KEY.match(w) for w in words):
         intake.mode, intake.tickets = "ticket", words

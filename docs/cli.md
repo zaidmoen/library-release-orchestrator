@@ -11,7 +11,7 @@ release-orchestrator [--config FILE] [--json] [-v] [--log-json] <command> [optio
 
 | Command | Writes | Options | Purpose |
 |---|---|---|---|
-| `analyze` | nothing | one of `--ticket K` (repeatable), `--request TEXT`, `--commit SHA` (repeatable); `--base REF`, `--source REF` | Dependency analysis only. Exit 3 if there are blocking findings. |
+| `analyze` | nothing | one of `--ticket K` (repeatable), `--request TEXT`, `--commit SHA` (repeatable); `--base REF`, `--source REF` (may be an RC tag), `--prerelease rc` | Dependency analysis only. Exit 3 if there are blocking findings. |
 | `plan` | run state; `--out` file plus `.md` | same as `analyze`, plus `--out FILE` | Deterministic release plan (manifest). Exit 3 if `BLOCKED`. |
 | `validate-manifest` | nothing | `--plan FILE` | Schema check, `plan_id` integrity, and comparison with the trusted config. |
 | `prepare` | release branch | `--plan FILE`, `--approve`, `--dry-run` | Build the isolated release branch. `--dry-run` works in a throwaway clone. |
@@ -21,6 +21,14 @@ release-orchestrator [--config FILE] [--json] [-v] [--log-json] <command> [optio
 | `publish` | registry artifact plus tag | `--plan FILE`, `--approve` | Immutable publish. In production this belongs in CI after merge. |
 | `update-consumers` | consumer branches plus PRs | `--plan FILE`, `--approve`, `--dry-run` | Targeted dependency bumps, validated against the published artifact. |
 | `status` | nothing | `--plan FILE` | Run state and history. |
+| `push` | remote refs | `--plan FILE`, `--approve` | Push the release branch, the tag (once published) and prepared consumer branches to `remote_allowlist` remotes. One ref per push, never forced, never overwrites a tag |
+| `reconcile-prs` | local PR records only | `--plan FILE` | Match PR requests with `refs/pull/*/head` on the remote: discover, verify, or flag drift and duplicates (ADR-0010). Exit 3 when anything doesn't match |
+| `record-pr` | PR record | `--plan`, `--repository`, `--head`, `--number`, `--url`, `--state` | Record a draft PR created externally (GitHub MCP) for provider `external` |
+| `env-status` | nothing | | Current version and policy per environment |
+| `promote` | environment ledger | `--version`, `--env`, `--approved-by` (repeatable), `--approve` | Ordered promotion of a published artifact (ADR-0007) |
+| `rollback-plan` | nothing | `--env` | Previous artifact for that environment, digest verified |
+| `rollback` | environment ledger | `--env`, `--approved-by`, `--approve` | Roll forward to the previous artifact (appends a record) |
+| `lab-init` | creates `--dest` | `--dest DIR` | Release lab: library with seven tickets, RC tags, two consumers |
 | `demo-init` | creates `--dest` | `--dest DIR`, `--scenario independent\|dependent\|conflict\|failing` | Fictional demo environment. |
 
 ## Exit codes
@@ -80,3 +88,93 @@ release-orchestrator [--config FILE] [--json] [-v] [--log-json] <command> [optio
 Validation rules are in `planning/manifest.py::validate_manifest`. A manifest is never
 accepted as proof of its own contents: `verify` and `validate` re-derive everything from
 Git, and validation commands always come from the config.
+
+## Commands added in the release-lab iteration
+
+| Command | Writes | Purpose |
+|---|---|---|
+| `pr-status --plan FILE` | run state (evidence) | Read the recorded library PR from GitHub (state, draft, merged, head, reviews, checks) and evaluate `approval_policy`. Exit 3 if not approved |
+| `github-pr-status --repository o/r --number N [--expected-head SHA] [--required-approvals N] [--required-check NAME] [--allow-draft]` | nothing | Same read and evaluation for any PR, no config needed |
+
+New `BLOCKED` reasons: `APPROVAL_NOT_VERIFIED`, `PRODUCTION_PUBLISH_UNAUTHORIZED`,
+`PR_NOT_RECORDED`, `GITHUB_REPO_UNMAPPED`, `ARTIFACT_BUILD_FAILED`,
+`ARTIFACT_VERSION_MISMATCH`, `ISSUE_DATA_STALE`, `ISSUE_INACCESSIBLE`,
+`ISSUE_NOT_RELEASABLE`, `UNRESOLVED_BLOCKER`, `ISSUE_LINK_CYCLE`. New error codes:
+`GITHUB_ACCESS_DENIED`, `REGISTRY_AUTH_FAILED`, `CONCURRENT_MODIFICATION` (exit 6).
+
+## Release modes (ADR-0014)
+
+| Command | Writes | Purpose |
+|---|---|---|
+| `release-mode discover` | nothing | stable release, pending RCs (contents, containment), pending tickets, services, environments and branches, GitHub refs, uncertainties, fingerprint |
+| `release-mode options --mode M [--ticket K] [--candidate T] [--order A,B]` | nothing | Q1: evidence-backed single-choice options with validity and recommendation |
+| `release-mode preview --mode M ... --choice ID [--services a,b\|all] [--environments e1,e2\|all] [--out F]` | `--out` files only | impact preview; exit 3 when BLOCKED |
+| `release-mode check-preview --preview F` | nothing | `STALE_PREVIEW` (exit 3) if the discovered state changed |
+| `verify-lineage --plan F --candidate T` | run state | final release == candidate except the version file (`LINEAGE_MISMATCH`) |
+| `update-consumers ... --consumer NAME` | as before | restrict the operation to selected services |
+
+## Discovery and reporting (ADR-0015, all read-only)
+
+| Command | Purpose | Exit codes |
+|---|---|---|
+| `context [--path DIR]` | repository, `owner/name`, branch, HEAD, default branch, config, tags; each with its source | 0 ok, 5 when `problems[]` needs input |
+| `resolve-change [--pr N\|#N\|URL] [--ticket KEY]` | PR ↔ Jira resolution (scenarios A–D) | 0 `RESOLVED`, 5 `NEEDS_INPUT` / `CONFLICT` |
+| `release-graph [--ticket K]... [--order rcA,rcB]` | ancestry, functional dependencies (CONFIRMED/INFERRED/UNKNOWN/BLOCKED), overlaps, ordering | 0, 3 when BLOCKED |
+| `release-report --preview P [--pr] [--ticket] [--out DIR]` | dry-run report + Slack payload/text (never sent) | 0, 3 when BLOCKED; refuses a stale preview |
+
+`--config` is now optional: `$LRO_CONFIG`, then `./release-orchestrator.yaml`, then the
+nearest config (up to 3 parent directories) whose `library.repo` is the current repository.
+`--repository owner/name` overrides the GitHub identity when the remote can't provide it.
+Optional config keys: `pull_requests.snapshot` (PR snapshot file, labelled as such) and
+`dependency_sheet: {provider: csv, path, columns}`.
+
+## One-call assessment and caching (ADR-0016)
+
+| Command | Purpose | Exit codes |
+|---|---|---|
+| `assess [--pr N\|#N\|URL] [--ticket KEY] [--candidate TAG] [--order rcA,rcB] [--brief]` | the single read-only call behind `/library-release`: status card (READY / BLOCKED / NEEDS REVIEW / UNKNOWN), `why`, `next`, `decisions_needed`, `decision_log`, `freshness`, `timings` | 0 READY / NEEDS REVIEW, 3 BLOCKED, 5 UNKNOWN |
+| `cache clear` / `cache stats` | the immutable analysis cache under `<state_dir>/cache/v1` | 0 |
+
+Global flags:
+
+* `--no-cache` (or `LRO_NO_CACHE=1`) disables the disk cache.
+* `LRO_OPTIMIZE=0` runs the original, unoptimized code paths. The differential tests
+  prove both modes give identical results.
+
+The cache holds only facts fixed by commit SHAs. Refs, remote tags, PR reviews and checks,
+Jira, registry and environments are always read live.
+
+## MCP evidence, config-free start, consumers, branches, release notes (ADR-0017)
+
+| Command | Purpose | Writes |
+|---|---|---|
+| `bootstrap` | show the runtime config (derived, or the YAML in use) with provenance and open questions | audit copy in `.git/lro-state` only |
+| `trust-validation --scope library\|<svc> --name N [--env K=V] --approve -- <argv>` | confirm a validation command (validated like YAML) | `.git/lro-state/trusted-validation.json` |
+| `mcp-ingest --kind K [--repository o/r] [--key path] [--tool T] --from FILE\|-` | validate and store GitHub/Jira MCP output | `<state>/mcp` |
+| `consumers [--add name-or-url]` | README-first discovery with verification | none |
+| `impact --plan P` | consumer impact matrix | none |
+| `branch-plan --plan P [--consumer svc]` | branch/PR strategy per repository | none |
+| `release-notes --plan P [--out notes.md]` | draft notes from the shipped commits | the `--out` file |
+| `publish-release-notes --plan P --github-repository o/r --approve` | create/update the **draft** GitHub Release (gated) | GitHub (draft only) |
+| `update-consumers ... --base <svc>=<branch>` | use the confirmed target branch | as before (gated) |
+
+Kinds: `github-pulls`, `github-branches`, `github-tags`, `github-file`,
+`github-code-search`, `jira-issue`.
+
+## Single-file Skill, reorder progress, operations and Slack (ADR-0018)
+
+| Command | Purpose | Writes |
+|---|---|---|
+| `release-mode progress --preview P` | re-verify a reordered sequence: DONE / NEXT / PENDING, `DRIFT` (exit 3) on moved tags or unexpected releases | none |
+| `op start --kind create-rc\|release\|reorder [--order a,b] [--ticket K] [--repository o/r] [--allow-concurrent]` | new operation (correlation ID); refuses a second active one (`CONCURRENT_OPERATION`) | `<state>/operations` |
+| `op actor --op ID --tool T --from FILE` | engineer identity from an authenticated MCP payload | `<state>/operations` |
+| `op event --op ID --event E [--evidence engine.json] [--step "..."] [--note "..."]` | record an event; outcome events must be supported by engine output | `<state>/operations` |
+| `op report --op ID [--out audit.md]` / `op list` | audit report / active operations | the `--out` file |
+| `notify channel --from search.json [--name N]` | resolve the Slack channel (exact, non-archived) | none |
+| `notify policy [--enable --from search.json --approve \| --disable] [--events E1,E2]` | org-approved automatic notifications | `~/.lro/notify-policy.json` |
+| `notify plan --op ID --event E` | `post` (channel, thread, message) / `skip` / `reconcile` / `disabled` | outbox state |
+| `notify record --op ID --event E --from response.txt` | delivered / not_sent / uncertain | outbox state |
+| `notify reconcile --op ID --from history.json` | resolve uncertain deliveries by their marker | outbox state |
+
+The engine bootstrap is `scripts/lro_engine.py install|verify|status` (standard library
+only); see [skill-distribution.md](skill-distribution.md).

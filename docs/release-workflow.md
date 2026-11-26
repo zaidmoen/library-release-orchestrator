@@ -40,6 +40,7 @@ stateDiagram-v2
   VALIDATING --> FAILED
   PR_READY --> PUBLISHED
   PR_READY --> BLOCKED
+  PR_READY --> FAILED
   PUBLISHED --> COMPLETED
   PUBLISHED --> BLOCKED
   BLOCKED --> ANALYZING
@@ -70,7 +71,14 @@ leaves the state unchanged.
 | `pr` | PR record | **yes** | `PR_READY` | `PR_READY` (+PR ref) |
 | `publish` | registry entry | **yes** | `PR_READY` | `PUBLISHED` |
 | `update-consumers` | branches in consumer repos plus PR records | **yes** | version present in registry | `COMPLETED` / `BLOCKED` |
+| `push` | remote refs (allowlisted) | **yes** | validated | unchanged |
+| `record-pr` | PR record | no (records a PR a human approved) | PR request exists | unchanged |
+| `promote` / `rollback` | environment ledger | **yes** plus approver quorum | artifact published (ADR-0007) | separate ledger |
 | `status` | no | no | none | none |
+
+If tag creation fails after the artifact was stored, the run moves to `FAILED`. Re-running
+`publish` finds the identical artifact (`already_published`), creates the missing tag and
+moves to `PUBLISHED` (scenario S12).
 
 In production, `publish` should run from CI after the library PR has been reviewed
 and merged by a human. The POC exposes it as an approved CLI step so that the

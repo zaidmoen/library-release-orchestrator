@@ -55,7 +55,15 @@ def recommend_version(
     tagged: Iterable[SemVer],
     api_removals: Iterable[str] = (),
     initial: SemVer = INITIAL_VERSION,
+    prerelease: str | None = None,
 ) -> VersionDecision:
+    """Recommend the next version.
+
+    With ``prerelease`` (e.g. ``"rc"``) the result is ``<target>-rc.<N>`` where ``<target>``
+    is the next final version and ``N`` is one more than the highest existing ``rc`` for
+    that target. RC numbers only order candidates; they say nothing about which changes a
+    candidate contains (``rc.24`` may contain *less* than ``rc.23``).
+    """
     level = BumpLevel.PATCH
     reasons: list[str] = []
     for commit in commits:
@@ -73,6 +81,23 @@ def recommend_version(
     known = [v for v in published_set | tagged_set if not v.is_prerelease]
     previous = max(known) if known else None
     proposed = previous.bump(level) if previous else initial
+    if prerelease:
+        if not prerelease.isalpha():
+            raise ValueError("prerelease label must be alphabetic, e.g. 'rc'")
+        numbers = [
+            int(v.prerelease[1])
+            for v in published_set | tagged_set
+            if (v.major, v.minor, v.patch) == (proposed.major, proposed.minor, proposed.patch)
+            and len(v.prerelease) == 2
+            and v.prerelease[0] == prerelease
+            and v.prerelease[1].isdigit()
+        ]
+        number = max(numbers, default=0) + 1
+        proposed = SemVer(proposed.major, proposed.minor, proposed.patch, (prerelease, str(number)))
+        reasons.append(
+            f"{prerelease}.{number}: next candidate number for {proposed.major}."
+            f"{proposed.minor}.{proposed.patch} (ordering only, not content)"
+        )
 
     collisions = []
     if proposed in published_set:

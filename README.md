@@ -102,21 +102,124 @@ The latest generated output is in [examples/demo/RESULTS.md](examples/demo/RESUL
 | E: duplicate run | `independent` | identical plan, `already_prepared`, `already_published`, no duplicates |
 | F: failing tests | `failing` | static analysis only warns; validation fails; PR and publish refused |
 
+## Release lab (S01–S15)
+
+A realistic synthetic trunk with seven pending tickets (independent, code-dependent,
+conflicting, behaviourally dependent and breaking changes), cumulative RC tags and two
+consumer services. See [docs/release-lab.md](docs/release-lab.md) and
+[docs/lab-setup.md](docs/lab-setup.md).
+
+```bash
+release-orchestrator lab-init --dest ./.lab
+python examples/lab/run_lab.py        # S01–S15 through the CLI -> examples/lab/RESULTS.md
+```
+
+New in this version: release candidates (`--prerelease rc`, `--source <rc-tag>`), an
+environment ledger (`promote`, `env-status`, `rollback-plan`, `rollback`; ADR-0007),
+approved never-forced `push` to allowlisted remotes, and draft PRs created through the
+GitHub MCP server and recorded with `record-pr` (ADR-0008).
+Assessment: [docs/production-readiness.md](docs/production-readiness.md) ·
+audit: [docs/audit.md](docs/audit.md).
+
+## Release modes (interactive)
+
+Three modes share one workflow: automatic discovery → Q1 dependency check (single
+choice) → Q2 services (multi select) → Q3 environments (optional) → impact preview →
+approval gate.
+
+```bash
+release-orchestrator release-mode options --mode release-candidate --ticket FIN-211
+release-orchestrator release-mode options --mode release --candidate v1.1.0-rc.22
+release-orchestrator release-mode options --mode reorder-releases --order v1.1.0-rc.23,v1.1.0-rc.22
+```
+
+Guide and verified demo output: [docs/release-modes.md](docs/release-modes.md) ·
+[ADR-0014](docs/adr/0014-interactive-release-modes.md).
+
+### Discovery, PR/Jira resolution and dependency intelligence
+
+Run from inside the library repository with no flags: the repository, GitHub
+`owner/name`, branch, default branch, config and releases are discovered. One reference
+(a PR *or* a Jira key) is enough when the PR title or branch carries the key.
+
+```bash
+release-orchestrator context
+release-orchestrator resolve-change --pr 15          # or --ticket FIN-211, or nothing
+release-orchestrator release-graph --order v1.1.0-rc.23,v1.1.0-rc.22
+release-orchestrator release-report --preview p.json --pr 15 --out report   # + Slack text
+```
+
+Git ancestry ("rc.23 contains rc.22") is reported as content, never as a functional
+dependency. Dependencies come from Jira links, code analysis or an optional sheet, and
+are classified CONFIRMED / INFERRED / UNKNOWN / BLOCKED. See
+[ADR-0015](docs/adr/0015-discovery-and-dependency-intelligence.md) and the
+[live demo guide](docs/live-demo.md).
+
+### One file for engineers (ADR-0018)
+
+Engineers install only [`distribution/library-release/SKILL.md`](distribution/library-release/SKILL.md)
+at `~/.claude/skills/library-release/SKILL.md`. On first use it fetches **one pinned
+commit** of this engine, verifies it, and caches it in `~/.lro` (offline afterwards).
+Reorders are verified step by step (`release-mode progress`), every operation has an audit
+trail, and the team sees it in `#library-release-orchestrator` through Slack MCP. See
+[docs/skill-distribution.md](docs/skill-distribution.md) and
+[ADR-0018](docs/adr/0018-single-file-skill-reorder-hardening-slack.md).
+
+### Works in any library repository (ADR-0017)
+
+Open Claude Code inside a shared library and run `/library-release`: no YAML required.
+The engine:
+* derives its runtime config (validated like YAML, with the source of every value);
+* reads the README to find consumer services and verifies them against their manifests;
+* uses GitHub and Jira MCP evidence when available;
+* proposes branch and PR strategies;
+* drafts GitHub Release notes from the commits that actually ship.
+
+Two things stay human decisions: a validation command (confirmed once with
+`trust-validation`), and every write (each behind `--approve`). Published release tags
+are immutable: a reorder creates a new candidate.
+
+See [docs/engineering-guide.md](docs/engineering-guide.md) and
+[ADR-0017](docs/adr/0017-mcp-native-config-free-release.md).
+
 ## Claude Code Skill
 
 The Skill lives in [.claude/skills/library-release/](.claude/skills/library-release/SKILL.md).
-Open Claude Code in a directory with a `release-orchestrator.yaml` and run:
+Open Claude Code inside the library repository (or one with a discoverable
+`release-orchestrator.yaml`). The entry point is always `/library-release`;
+arguments are optional:
 
+```text
+/library-release
+/library-release #15
+/library-release https://github.com/owner/library/pull/15
+/library-release FIN-211
+/library-release FIN-211 #15
+/library-release v1.1.0-rc.22
 ```
+
+Claude runs deterministic argument intake followed by **one read-only `assess` engine call**.
+The default reply is a **≤ 8-line** STATUS / WHY / NEXT card (READY / BLOCKED /
+NEEDS REVIEW / UNKNOWN); use "why?" to expand evidence from the same result without
+re-running the analysis. The engine, not Claude, decides release correctness.
+Including prerequisites or changing release content is never selected silently.
+
+Existing workflow inputs still work, for example:
+
+```text
 /library-release FIN-204
 /library-release FIN-204 --dry-run
 /library-release "Release Change B before Change A"
 /library-release FIN-204 --plan-only
 ```
 
-Claude parses the arguments deterministically (`scripts/lro.py intake`), calls the CLI,
-explains findings, and **asks before every write step**. It can't override a `BLOCKED`
-result, and it never pushes, merges or deploys.
+Additional read-only details (graph, impact preview, report and unsent Slack text)
+are available on request. Every actual write remains behind an explicit
+`--approve` gate; the Skill cannot override BLOCKED and never merges or deploys.
+
+For the team walkthrough and real-library prerequisites, see
+[the live demo guide](docs/live-demo.md). For measured cold/warm timing, Git calls,
+and correctness comparisons, see [Phase 1 performance](docs/performance.md).
 
 ## Configuration
 
@@ -162,6 +265,22 @@ CI runs these on Linux and Windows with Python 3.11 and 3.12
 
 ## Implementation status
 
+The authoritative, evidence-linked matrix is [docs/engineering-assessment.md](docs/engineering-assessment.md). Additions in the latest iteration:
+
+| Area | Status |
+|---|---|
+| PR discovery and reconciliation through `refs/pull/*` (ADR-0010) | **Verified live** (read-only) |
+| Authoritative PR status, reviews, checks; approval policy gating `publish` (ADR-0011) | **Verified live** (read-only, PR #2); gate verified locally |
+| PEP 503 package index with reproducible wheels, never-overwrite, lost-response reconciliation (ADR-0012) | Verified locally against a real pypiserver; no production index |
+| Issue eligibility from timestamped snapshots: status, blockers, cycles, staleness (ADR-0013) | Verified locally; live Jira **blocked** |
+| Run-state optimistic concurrency, structured transition logs | Verified locally |
+| Security hardening: strict URL/origin validation, explicit registry classification, fail-closed approvals (verified reviewer permission, dismissals, statuses, unreadable protection), production publication refused | Verified locally (`test_config_security.py`, `test_github_status.py`, `test_publish_authorization.py`) |
+| RC → final promotion | **Not implemented** |
+
+Operations: [runbook](docs/operations-runbook.md) · [integrations](docs/integrations.md) · [testing strategy](docs/testing-strategy.md) · [live GitHub validation](docs/live-github-validation.md)
+
+Earlier capabilities:
+
 | Area | Status |
 |---|---|
 | Git analysis, change mapping, multi-commit changes, ambiguity reporting | Implemented and tested |
@@ -172,7 +291,11 @@ CI runs these on Linux and Windows with Python 3.11 and 3.12
 | Allowlisted validation (library and consumers) | Implemented and tested |
 | Consumer discovery and pin updates (`requirements.txt` `==` pins) | Implemented and tested |
 | Local PR provider | Implemented and tested |
-| GitHub PR provider (draft only, no merge) | Implemented and unit-tested with a fake transport; **not verified against live GitHub** |
+| GitHub PR provider (draft only, no merge) | **MOCKED**: fake transport only (no token available) |
+| Draft PRs via GitHub MCP + `record-pr` (provider `external`) | Implemented; live status in [docs/evidence/live-github.md](docs/evidence/live-github.md) |
+| Allowlisted, never-forced push | LOCAL INTEGRATION (real pushes to local bare remotes) |
+| Release candidates and cumulative-RC subsets | LOCAL INTEGRATION (S06) |
+| Environment ledger: promotion, quorum, rollback | LOCAL INTEGRATION (S13, S14) |
 | Jira REST provider | **Planned** (offline YAML fixture adapter only) |
 | Remote registries (Artifactory, CodeArtifact, PyPI) | **Planned** |
 | Non-Python language adapters | **Planned** (non-Python files are reported as unverified) |

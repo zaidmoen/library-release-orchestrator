@@ -81,15 +81,19 @@ def scan_history(
     # for an earlier out-of-order release). Matching patch-ids mean "already released".
     released_ids: set[str] = set()
     released_shas: set[str] = set()
-    for sha in git.rev_list(f"{source_sha}..{base_sha}"):
-        released_ids.add(git.patch_id(sha))
+    base_only = git.rev_list(f"{source_sha}..{base_sha}")
+    base_ids = git.patch_ids(base_only)  # batched; identical to per-commit patch_id
+    for sha in base_only:
+        released_ids.add(base_ids[sha])
         released_shas.update(_PICKED_RE.findall(git.commit_info(sha).body))
 
     scan.merges_skipped = git.merge_commits(f"{base_sha}..{source_sha}")
     grouped: dict[str, list[CommitInfo]] = {}
-    for sha in git.rev_list(f"{base_sha}..{source_sha}"):
+    pending = git.rev_list(f"{base_sha}..{source_sha}")
+    pending_ids = git.patch_ids(pending)
+    for sha in pending:
         commit = git.commit_info(sha)
-        patch_id = git.patch_id(sha)
+        patch_id = pending_ids[sha]
         scan.patch_ids[sha] = patch_id
         keys = extract_keys(commit, key_pattern)
         if not keys:
