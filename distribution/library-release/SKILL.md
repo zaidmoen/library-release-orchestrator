@@ -18,7 +18,7 @@ successful unless the engine's JSON says `"ok": true`.
 | | |
 |---|---|
 | Source | `https://github.com/zaidmoen/library-release-orchestrator.git` |
-| Pinned revision | `__PINNED_SHA__` |
+| Pinned revision | `fdc8f65d0e2165b6d26033929d77898cf1341e2d` |
 | Cache | `~/.lro/engines/<revision>/` (or `$LRO_HOME`), never inside the target repository |
 
 Run this block with the Bash tool at the start of every `/library-release`. It never
@@ -31,7 +31,7 @@ changes the working directory and never sends anything from the engineer's repos
 * **Later uses:** run it without asking. It only verifies the cached engine, offline.
 
 ```bash lro-bootstrap
-LRO_SHA=__PINNED_SHA__
+LRO_SHA=fdc8f65d0e2165b6d26033929d77898cf1341e2d
 LRO_REPO=https://github.com/zaidmoen/library-release-orchestrator.git
 LRO_HOME="${LRO_HOME:-$HOME/.lro}"
 E="$LRO_HOME/engines/$LRO_SHA"
@@ -60,7 +60,7 @@ else
 fi
 ```
 
-`LRO` below means `bash "${LRO_HOME:-$HOME/.lro}/engines/__PINNED_SHA__/bin/lro"`, run
+`LRO` below means `bash "${LRO_HOME:-$HOME/.lro}/engines/fdc8f65d0e2165b6d26033929d77898cf1341e2d/bin/lro"`, run
 from the engineer's repository (the current directory). It always prints one JSON
 envelope and a stable exit code:
 
@@ -82,7 +82,7 @@ Updates happen only when a new version of this file, with a new pinned revision,
 distributed.
 
 **Version-matched detail:** the full workflow for this revision is in
-`${LRO_HOME:-$HOME/.lro}/engines/__PINNED_SHA__/src/.claude/skills/library-release/`
+`${LRO_HOME:-$HOME/.lro}/engines/fdc8f65d0e2165b6d26033929d77898cf1341e2d/src/.claude/skills/library-release/`
 (`SKILL.md`, `references/`, `templates/`). Read those files when you need more detail.
 There, `LRO` means the same wrapper.
 
