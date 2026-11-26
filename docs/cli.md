@@ -160,3 +160,21 @@ Jira, registry and environments are always read live.
 
 Kinds: `github-pulls`, `github-branches`, `github-tags`, `github-file`,
 `github-code-search`, `jira-issue`.
+
+## Single-file Skill, reorder progress, operations and Slack (ADR-0018)
+
+| Command | Purpose | Writes |
+|---|---|---|
+| `release-mode progress --preview P` | re-verify a reordered sequence: DONE / NEXT / PENDING, `DRIFT` (exit 3) on moved tags or unexpected releases | none |
+| `op start --kind create-rc\|release\|reorder [--order a,b] [--ticket K] [--repository o/r] [--allow-concurrent]` | new operation (correlation ID); refuses a second active one (`CONCURRENT_OPERATION`) | `<state>/operations` |
+| `op actor --op ID --tool T --from FILE` | engineer identity from an authenticated MCP payload | `<state>/operations` |
+| `op event --op ID --event E [--evidence engine.json] [--step "..."] [--note "..."]` | record an event; outcome events must be supported by engine output | `<state>/operations` |
+| `op report --op ID [--out audit.md]` / `op list` | audit report / active operations | the `--out` file |
+| `notify channel --from search.json [--name N]` | resolve the Slack channel (exact, non-archived) | none |
+| `notify policy [--enable --from search.json --approve \| --disable] [--events E1,E2]` | org-approved automatic notifications | `~/.lro/notify-policy.json` |
+| `notify plan --op ID --event E` | `post` (channel, thread, message) / `skip` / `reconcile` / `disabled` | outbox state |
+| `notify record --op ID --event E --from response.txt` | delivered / not_sent / uncertain | outbox state |
+| `notify reconcile --op ID --from history.json` | resolve uncertain deliveries by their marker | outbox state |
+
+The engine bootstrap is `scripts/lro_engine.py install|verify|status` (standard library
+only); see [skill-distribution.md](skill-distribution.md).

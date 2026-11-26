@@ -155,6 +155,16 @@ are classified CONFIRMED / INFERRED / UNKNOWN / BLOCKED. See
 [ADR-0015](docs/adr/0015-discovery-and-dependency-intelligence.md) and the
 [live demo guide](docs/live-demo.md).
 
+### One file for engineers (ADR-0018)
+
+Engineers install only [`distribution/library-release/SKILL.md`](distribution/library-release/SKILL.md)
+at `~/.claude/skills/library-release/SKILL.md`. On first use it fetches **one pinned
+commit** of this engine, verifies it, and caches it in `~/.lro` (offline afterwards).
+Reorders are verified step by step (`release-mode progress`), every operation has an audit
+trail, and the team sees it in `#library-release-orchestrator` through Slack MCP. See
+[docs/skill-distribution.md](docs/skill-distribution.md) and
+[ADR-0018](docs/adr/0018-single-file-skill-reorder-hardening-slack.md).
+
 ### Works in any library repository (ADR-0017)
 
 Open Claude Code inside a shared library and run `/library-release`: no YAML required.

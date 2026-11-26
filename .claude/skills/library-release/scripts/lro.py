@@ -17,10 +17,34 @@ the Skill silently run different release logic.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 REPO_SRC = Path(__file__).resolve().parents[4] / "src"
+
+
+def _revision() -> str:
+    """The engine revision for audit: the verified pinned install, else this checkout."""
+    root = REPO_SRC.parent
+    marker = root.parent / "engine.json"  # <LRO_HOME>/engines/<sha>/engine.json
+    try:
+        sha = json.loads(marker.read_text(encoding="utf-8"))["sha"]
+        if sha == root.parent.name:
+            return f"{sha} (pinned install)"
+    except (OSError, ValueError, KeyError):
+        pass
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return "unknown"
+    return f"{head} (development checkout)"
 
 
 def _import_package() -> Path:
@@ -43,6 +67,7 @@ def _import_package() -> Path:
 
 def main(argv: list[str]) -> int:
     engine = _import_package()
+    os.environ.setdefault("LRO_ENGINE_REVISION", _revision())
     from release_orchestrator import __version__
     from release_orchestrator.cli import main as cli_main
     from release_orchestrator.errors import OrchestratorError
@@ -59,7 +84,11 @@ def main(argv: list[str]) -> int:
                 {
                     "ok": True,
                     "intake": intake.to_dict(),
-                    "engine": {"path": str(engine), "version": __version__},
+                    "engine": {
+                        "path": str(engine),
+                        "version": __version__,
+                        "revision": os.environ["LRO_ENGINE_REVISION"],
+                    },
                 },
                 indent=2,
             )

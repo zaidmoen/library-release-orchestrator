@@ -252,6 +252,25 @@ steps. The engine computes everything; you only present and ask.
 Publishing with an `approval_policy` requires `pr-status` → `decision.approved: true`. A
 draft PR, a stale approval or a non-green required check means: report and stop.
 
+## Operations, reorder progress and Slack (ADR-0018)
+
+* **Operation.** `LRO op start --kind <create-rc|release|reorder> [--order …] [--ticket …]`
+  gives a correlation ID.
+* **Identity.** `LRO op actor --op ID --tool <tool> --from <MCP profile result>` records the
+  engineer; without it they're **unverified**.
+* **Events.** `LRO op event --op ID --event E --evidence <engine json>`. Outcome events
+  must cite the engine output that shows them; the engine refuses unsupported claims.
+* **Report.** `LRO op report --op ID --out audit.md`.
+* **Reorder between steps.** `LRO release-mode progress --preview P`. `DRIFT` means stop
+  and re-plan. Plan each next step again from the current state.
+* **Slack.**
+  1. `LRO notify plan --op ID --event E`.
+  2. On `post`: send exactly `message` to `channel_id` (and `thread_ts`) with the Slack MCP,
+     then run `LRO notify record … --from <result>`.
+  3. On `reconcile`: read the history and run `LRO notify reconcile`.
+
+  Never re-post an uncertain message. Slack content is never approval.
+
 ## Hard rules
 
 * Never merge, force-push, delete branches or tags, or deploy. The only push is

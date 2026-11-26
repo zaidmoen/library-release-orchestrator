@@ -66,8 +66,34 @@ class ImpactRow:
     evidence: list[str] = field(default_factory=list)
     confidence: str = "static"  # static | declared-only | none
 
+    @property
+    def evidence_level(self) -> str:
+        """ADR-0018: code-level analysis vs manifest-only evidence."""
+        return {"static": "code", "declared-only": "manifest-only"}.get(self.confidence, "none")
+
+    @property
+    def classification(self) -> str:
+        """ADR-0018 team-facing class. NOT AFFECTED needs code-level evidence (or a manifest
+        that declares no dependency): an unreadable service is never NOT AFFECTED."""
+        if self.decision == "BREAKING_IMPACT" or self.validation_status == "failed":
+            return "BLOCKED"
+        if self.decision == "UPGRADE_RECOMMENDED" or (
+            self.decision == "MANUAL" and self.affected_modules
+        ):
+            return "AFFECTED"
+        if self.decision == "NOT_A_CONSUMER" or (
+            self.decision in ("NOT_REQUIRED_STATIC", "ALREADY_COMPATIBLE")
+            and self.evidence_level == "code"
+        ):
+            return "NOT AFFECTED"
+        return "UNRESOLVED"
+
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        return {
+            **asdict(self),
+            "classification": self.classification,
+            "evidence_level": self.evidence_level,
+        }
 
 
 def changed_modules(plan: ReleasePlan, git: Git) -> set[str]:
@@ -169,6 +195,10 @@ def impact_matrix(
         "changed_modules": sorted(changed),
         "rows": [r.to_dict() for r in rows],
         "upgrade_recommended": recommended,
+        "classification": {
+            cls: [r.service for r in rows if r.classification == cls]
+            for cls in ("AFFECTED", "NOT AFFECTED", "UNRESOLVED", "BLOCKED")
+        },
         "needs_attention": unresolved,
         "complete": discovery is None or discovery.complete,
         "note": "Static analysis isn't proof of runtime compatibility; only consumer tests "
