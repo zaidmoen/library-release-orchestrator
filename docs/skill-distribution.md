@@ -51,6 +51,12 @@ check fails, the Skill stops with `LRO_ERROR=ENGINE_VERIFY_FAILED`.
   5. redistribute the file.
 * Old revisions stay cached side by side. Remove one with `rm -rf ~/.lro/engines/<sha>`.
 * There is no auto-update, and a branch name is rejected.
+* **Retention.** Every pinned revision gets an annotated tag `lro-engine-<sha12>`, for
+  example `lro-engine-fdc8f65d0e21` → `fdc8f65d0e2165b6d26033929d77898cf1341e2d`. The tag
+  keeps the commit reachable on GitHub even if its feature branch is deleted or
+  squash-merged.
+  * Never move or delete these tags.
+  * A GitHub tag ruleset protecting `lro-engine-*` (owner action) makes that enforceable.
 
 ## Offline vs live
 
@@ -125,7 +131,7 @@ unless the policy is enabled.
 | F | independent cumulative reorder | `test_enterprise_reorder::test_f_*` | sandbox |
 | G | confirmed prerequisite blocks | `test_mcp_native::test_j_*`, `test_release_modes::test_reorder_rc23_before_rc22_*` | sandbox |
 | H | three or more candidates | `test_h_j_*`, `test_mcp_native::test_i_three_*` | sandbox |
-| I | full multi-step lifecycle | `test_i_u_full_reordered_lifecycle_*` | sandbox (local registry) |
+| I | full multi-step lifecycle | `test_i_u_full_reordered_lifecycle_*`, plus a live run with the GitHub-installed engine | sandbox (local registry). **Direct-to-stable only:** each step was planned, then published as a stable release, with `progress` re-verification between steps. The proposed **RC-first** path (cut the new `new_candidate` RC, then finalize it in release mode) has not been tested end-to-end as a reordered sequence. |
 | J | collisions, immutable tags | `test_h_j_*`, `test_mcp_native::test_i_*` | sandbox |
 | K | missing/conflicting Jira | `test_issue_eligibility` (inaccessible, stale, disagreement), `test_live_jira_*` | mocked |
 | L | missing consumer repositories | `test_l_consumer_classification_*` | sandbox |

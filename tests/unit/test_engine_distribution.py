@@ -220,10 +220,30 @@ def test_d_platform_paths(tmp_path, monkeypatch):
     monkeypatch.setenv("LRO_HOME", str(tmp_path / "custom home"))
     assert lro_engine.lro_home() == (tmp_path / "custom home").resolve()
     venv = tmp_path / "venv"
-    monkeypatch.setattr(lro_engine.os, "name", "nt")
+
+    class _Os:
+        """Replaces only the installer module's ``os`` reference: the shared ``os``
+        module (used by pathlib and pytest) is never modified."""
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __getattr__(self, attr: str) -> Any:
+            return getattr(os, attr)
+
+    monkeypatch.setattr(lro_engine, "os", _Os("nt"))
     assert lro_engine.venv_python(venv) == venv / "Scripts" / "python.exe"
-    monkeypatch.setattr(lro_engine.os, "name", "posix")
+    monkeypatch.setattr(lro_engine, "os", _Os("posix"))
     assert lro_engine.venv_python(venv) == venv / "bin" / "python"
+    # a Windows-layout venv is recognised by its files on any platform
+    (venv / "Scripts").mkdir(parents=True)
+    (venv / "Scripts" / "python.exe").write_bytes(b"")
+    assert lro_engine.venv_python(venv) == venv / "Scripts" / "python.exe"
+    monkeypatch.undo()
+    assert os.name in ("nt", "posix")  # the real module is untouched
+    # the real platform: the layout the current interpreter's venvs actually use
+    expected = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
+    assert lro_engine.venv_python(tmp_path / "real") == tmp_path / "real" / Path(*expected)
     wrapper = lro_engine._wrapper(Path("C:/Users/a b/.lro/py.exe"), Path("C:/x y/lro.py"))
     assert '"C:/Users/a b/.lro/py.exe" -I "C:/x y/lro.py" "$@"' in wrapper
     assert "cd " not in wrapper  # never changes the working directory
