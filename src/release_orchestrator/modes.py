@@ -616,6 +616,8 @@ class ModeEngine:
             )
             # The step ships only its new keys; earlier steps' keys are already in the base.
             step.keys = sorted(new)
+            # Shown even when blocked: what the candidate has that this step leaves out.
+            step.excluded = sorted(set(cand.keys) - set(new) - released)
             if step.status == "PLAN_READY":
                 rc = SemVer.parse(cand.version)
                 stable = SemVer.parse(disc["latest_stable"]["version"])
@@ -628,7 +630,6 @@ class ModeEngine:
                     )
                 step.candidate_sha = cand.sha
                 step.expected_stable = f"{prefix}{version}"
-                step.excluded = sorted(set(cand.keys) - set(new) - released)
                 previous = steps[-1].expected_stable if steps else None
                 step.cut_from = previous or base
                 exact = (

@@ -93,6 +93,20 @@ def test_f_every_step_of_an_independent_reorder_is_explicit(tmp_path, monkeypatc
     assert natural[0]["new_candidate"] is None
 
 
+def test_g_blocked_step_shows_what_it_leaves_out(tmp_path, monkeypatch, capsys):
+    from release_orchestrator.lab import LIBRARY_DIR, build_lab
+
+    root = tmp_path / "lab"
+    build_lab(root)
+    cli = Cli(root / LIBRARY_DIR, monkeypatch, capsys)
+    req = _options(cli, "v1.1.0-rc.23,v1.1.0-rc.22")["requested"]
+    assert req["valid"] is False
+    first = req["produces"][0]
+    assert first["tickets"] == ["FIN-211"] and first["new_candidate"] is None
+    assert first["excluded"] == ["FIN-198", "FIN-204"]  # FIN-198 is the missing prerequisite
+    assert any("FIN-198" in e for e in req["evidence"])
+
+
 # --------------------------------------------------------------------------- H, J
 def test_h_j_three_candidates_get_distinct_never_used_candidates(tmp_path, monkeypatch, capsys):
     repo = _cumulative_repo(tmp_path, candidates=3)
